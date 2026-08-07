@@ -134,7 +134,7 @@
           <section class="page-intro">
             <span class="intro-label">CURRENT DETAIL</span>
             <h2>采集当前商品详情</h2>
-            <p>商品主表会以详情页为准；开启卖家资料后，会继续读取店铺简介与公开评价。</p>
+            <p>商品主表只以当前详情页为准；店铺简介、开店时长和公开评价请在“采集当前店铺页”单独补充。</p>
           </section>
 
           <section class="context-card detail-context-card" aria-live="polite">
@@ -149,6 +149,9 @@
 
           <section class="action-card">
             <button id="collectButton" class="button primary large" type="button">采集当前详情页</button>
+            <button id="currentCommitButton" class="button teal-action large" type="button" disabled>加到数据中心商品表</button>
+            <button id="currentExportButton" class="button outline-action large" type="button" disabled>导出当前详情页</button>
+            <p id="currentCollectHint" class="helper">采集完成后可以选择：加入数据中心商品总表，或只导出当前这一条商品。</p>
             <button id="diagnosticButton" class="button tertiary" type="button">一键导出页面诊断包</button>
           </section>
 
@@ -272,7 +275,7 @@ https://www.goofish.com/item?id=…"></textarea>
 
             <div class="settings-section">
               <h3>采集内容</h3>
-              <label class="choice-line compact-choice"><input id="collectSellerInfo" type="checkbox" /><span><strong>补充卖家公开资料</strong><small>打开卖家账号页，读取简介、公开评价、粉丝等可见信息</small></span></label>
+              <label class="choice-line compact-choice"><input id="collectSellerInfo" type="checkbox" /><span><strong>保留详情页卖家基础资料</strong><small>商品任务只保留详情页当前可见的卖家字段；完整店铺资料和评价请单独采集店铺页</small></span></label>
               <label class="choice-line compact-choice"><input id="saveAs" type="checkbox" /><span><strong>下载时显示“另存为”</strong><small>每次下载前由 Chrome 询问保存位置</small></span></label>
               <label class="choice-line compact-choice"><input id="notifyOnComplete" type="checkbox" /><span><strong>任务完成时显示系统通知</strong><small>即使侧边栏暂时收起，也能收到完成提示</small></span></label>
             </div>
@@ -308,7 +311,8 @@ https://www.goofish.com/item?id=…"></textarea>
 
             <div class="task-actions">
               <button id="stopJobButton" class="button outline-action" type="button" disabled>停止任务</button>
-              <button id="taskExportButton" class="button primary large" type="button">导出 Excel 数据</button>
+              <button id="taskCommitButton" class="button teal-action large" type="button" disabled>加到数据中心商品表</button>
+              <button id="taskExportButton" class="button primary large" type="button" disabled>导出本次商品数据</button>
               <button id="taskDataButton" class="button teal-action" type="button">打开数据中心</button>
             </div>
           </section>

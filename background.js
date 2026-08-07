@@ -355,6 +355,9 @@ async function writeHistory(history) {
 }
 
 function itemsForJob(job, items) {
+  if (Array.isArray(job?.stagedItems)) {
+    return job.stagedItems.map(item => sanitizeItem(item)).filter(Boolean);
+  }
   const resultKeys = new Set(Array.isArray(job.resultKeys) ? job.resultKeys : []);
   return resultKeys.size
     ? items.filter(item => resultKeys.has(itemKey(item)))
@@ -362,7 +365,9 @@ function itemsForJob(job, items) {
 }
 
 function historySummary(job, items, extra = {}) {
-  const snapshot = itemsForJob(job, items);
+  const snapshot = Array.isArray(extra.itemsSnapshot)
+    ? extra.itemsSnapshot.map(item => sanitizeItem(item)).filter(Boolean)
+    : itemsForJob(job, items);
   return {
     id: job.id,
     type: job.type,
@@ -393,7 +398,12 @@ async function recordHistory(job, extra = {}) {
   const next = history.filter(entry => entry.id !== job.id);
   next.unshift(historySummary(job, items, {
     ...extra,
-    storeProfilesSnapshot: await readStoreProfiles()
+    itemsSnapshot: Array.isArray(extra.itemsSnapshot)
+      ? extra.itemsSnapshot
+      : itemsForJob(job, items),
+    storeProfilesSnapshot: Array.isArray(extra.storeProfilesSnapshot)
+      ? extra.storeProfilesSnapshot
+      : []
   }));
   const settings = await readSettings();
   const cutoff = Date.now() - settings.keepHistoryDays * 24 * 60 * 60 * 1000;
@@ -621,7 +631,15 @@ function downloadFileName(settings, count, type, mode) {
     date,
     time,
     count: String(count),
-    type: type === 'links' ? '链接批量' : type === 'store' ? '店铺资料' : '搜索跨页',
+    type: type === 'links'
+      ? '链接批量'
+      : type === 'store'
+        ? '店铺资料'
+        : type === 'detail'
+          ? '当前详情'
+          : type === 'data'
+            ? '数据中心商品'
+            : '搜索跨页',
     mode: mode === 'api' ? '接口观察' : '页面详情'
   };
   const base = cleanDownloadPart(
@@ -713,12 +731,12 @@ async function ensureContentReceiver(tabId) {
 
 async function sendCollectionCommand(tabId) {
   await ensureContentReceiver(tabId);
-  return sendTabMessage(tabId, { type: 'COLLECT_CURRENT_PAGE' });
+  return sendTabMessage(tabId, { type: 'COLLECT_CURRENT_PAGE', persistToDataCenter: false });
 }
 
 async function sendApiCollectionCommand(tabId) {
   await ensureContentReceiver(tabId);
-  return sendTabMessage(tabId, { type: 'START_API_CAPTURE' });
+  return sendTabMessage(tabId, { type: 'START_API_CAPTURE', persistToDataCenter: false });
 }
 
 async function sendCollectionByMode(tabId, mode) {
@@ -998,16 +1016,19 @@ async function finishJob(job, status, message) {
   await chrome.alarms.clear(JOB_ALARM);
   const finalJob = jobMessage({ ...job, status }, message);
   await writeJob(finalJob);
+  const jobItems = itemsForJob(finalJob, await readItems());
 
   let exportResult = null;
   if (status === 'completed') {
     const settings = await readSettings();
     if (settings.downloadMode === 'auto') {
       try {
-        exportResult = await runExport(itemsForJob(finalJob, await readItems()), settings, {
+        exportResult = await runExport(jobItems, settings, {
           type: finalJob.type,
           mode: finalJob.mode,
-          storeProfiles: await readStoreProfiles()
+          // 商品任务只导出商品结果。店铺资料和评价必须通过“当前店铺页”单独导出，
+          // 不能因为浏览器里有历史店铺资料就混入商品工作簿。
+          storeProfiles: []
         });
         finalJob.autoExportStatus = 'completed';
         finalJob.fileName = exportResult.filename;
@@ -1027,7 +1048,9 @@ async function finishJob(job, status, message) {
 
   await recordHistory(finalJob, {
     autoExportStatus: finalJob.autoExportStatus,
-    fileName: finalJob.fileName
+    fileName: finalJob.fileName,
+    itemsSnapshot: jobItems,
+    storeProfilesSnapshot: []
   });
   await notifyJobFinished(finalJob, exportResult);
   return finalJob;
@@ -1076,14 +1099,14 @@ async function processLinkJob(job) {
     const count = Number(result?.count ?? result?.added ?? 0);
     const next = {
       ...job,
+      stagedItems: Array.isArray(result?.stagedItems) ? result.stagedItems : job.stagedItems,
       resultKeys: [...new Set([...(job.resultKeys || []), ...(result.keys || [])])],
       retries: 0
     };
-    const item = collectedItemForLink(result, { itemId: '', itemUrl: job.links?.[job.index] });
-    const enrichment = await prepareSellerEnrichment(next, item, count);
-    if (enrichment.kind === 'scheduled') return enrichment.job;
+    // 商品批量任务只读取商品详情页本身。店铺简介、评价和评价图片由“当前店铺页”
+    // 单独采集，避免任务为了补店铺资料跳到另一个标签页，也避免把店铺数据混入商品表。
     return advanceLinkJob({
-      ...enrichment.job,
+      ...next,
       collected: Number(job.collected || 0) + count
     });
   } catch (error) {
@@ -1372,13 +1395,12 @@ async function processSearchDetail(job) {
     const count = Number(result.count ?? result.added ?? 0);
     const next = {
       ...job,
+      stagedItems: Array.isArray(result?.stagedItems) ? result.stagedItems : job.stagedItems,
       expectedDetailUrl: '',
       resultKeys: [...new Set([...(job.resultKeys || []), ...(result.keys || [])])]
     };
-    const item = collectedItemForLink(result, currentLink);
-    const enrichment = await prepareSellerEnrichment(next, item, count);
-    if (enrichment.kind === 'scheduled') return enrichment.job;
-    return advanceSearchDetail(enrichment.job, count);
+    // 搜索跨页同样只把逐个打开的详情页结果暂存在本次任务中；店铺资料另行采集。
+    return advanceSearchDetail(next, count);
   } catch (error) {
     const retries = Number(job.retries || 0) + 1;
     if (retries <= 2) {
@@ -1478,6 +1500,8 @@ async function startLinksJob(links, delayMs = 1500, mode = 'rpa') {
     index: 0,
     pagesProcessed: 0,
     collected: 0,
+    stagedItems: [],
+    committedToDataCenter: false,
     resultKeys: [],
     sellerProfiles: {},
     sellerFailures: [],
@@ -1528,6 +1552,8 @@ async function startSearchJob(startUrl, targetCount, maxPages, delayMs = 1800, m
     maxPages: Math.max(1, Number(maxPages) || 10),
     pagesProcessed: 0,
     collected: 0,
+    stagedItems: [],
+    committedToDataCenter: false,
     resultKeys: [],
     sellerProfiles: {},
     sellerFailures: [],
@@ -1622,13 +1648,56 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const incoming = (Array.isArray(message.items) ? message.items : [])
           .map(item => sanitizeItem({ ...item, sourcePage: item.sourcePage || pageUrl }, pageUrl))
           .filter(Boolean);
+        const resultKeys = incoming.map(itemKey);
+        const activeJob = activeJobBeforeWrite || await readJob();
+        const belongsToActiveTask = Boolean(
+          activeJob
+          && jobIsActive(activeJob)
+          && activeJob.tabId === sender?.tab?.id
+          && ['links', 'search'].includes(activeJob.type)
+        );
+
+        // 详情页单采和批量任务默认只写入“本次结果暂存区”。这样用户可以先检查结果，
+        // 再决定是否合并进数据中心商品总表；也不会因为一次店铺采集而带出旧商品。
+        if (message.persistToDataCenter === false) {
+          if (belongsToActiveTask) {
+            const previousStaged = Array.isArray(activeJob.stagedItems) ? activeJob.stagedItems : [];
+            const oldKeys = new Set(previousStaged.map(itemKey));
+            const stagedItems = mergeItems(previousStaged, incoming);
+            await writeJob({
+              ...activeJob,
+              stagedItems,
+              resultKeys: [...new Set([...(activeJob.resultKeys || []), ...resultKeys])],
+              updatedAt: new Date().toISOString()
+            });
+            return {
+              ok: true,
+              count: incoming.length,
+              added: stagedItems.filter(item => !oldKeys.has(itemKey(item))).length,
+              total: (await readItems()).length,
+              stagedCount: stagedItems.length,
+              stagedItems,
+              keys: resultKeys,
+              items: incoming,
+              staged: true
+            };
+          }
+          return {
+            ok: true,
+            count: incoming.length,
+            added: incoming.length,
+            total: (await readItems()).length,
+            keys: resultKeys,
+            items: incoming,
+            staged: true
+          };
+        }
+
         const existing = await readItems();
         const oldKeys = new Set(existing.map(itemKey));
         const merged = mergeItems(existing, incoming);
         const added = merged.filter(item => !oldKeys.has(itemKey(item))).length;
         await writeItems(merged);
-        const activeJob = activeJobBeforeWrite || await readJob();
-        const resultKeys = incoming.map(itemKey);
         if (activeJob && jobIsActive(activeJob) && activeJob.tabId === sender?.tab?.id && resultKeys.length) {
           await writeJob({
             ...activeJob,
@@ -1641,8 +1710,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           count: incoming.length,
           added,
           total: merged.length,
-          keys: resultKeys
+          keys: resultKeys,
+          items: incoming,
+          staged: false
         };
+      }
+
+      case 'COMMIT_ITEMS': {
+        const pageUrl = message.sourcePage || sender?.tab?.url || '';
+        const incoming = (Array.isArray(message.items) ? message.items : [])
+          .map(item => sanitizeItem({ ...item, sourcePage: item.sourcePage || pageUrl }, pageUrl))
+          .filter(Boolean);
+        if (!incoming.length) return { ok: false, error: '没有可加入数据中心的商品结果。' };
+        const existing = await readItems();
+        const oldKeys = new Set(existing.map(itemKey));
+        const merged = mergeItems(existing, incoming);
+        const added = merged.filter(item => !oldKeys.has(itemKey(item))).length;
+        await writeItems(merged);
+        return { ok: true, count: incoming.length, added, total: merged.length };
+      }
+
+      case 'COMMIT_JOB_RESULT': {
+        const job = await readJob();
+        if (!job || (message.jobId && job.id !== message.jobId)) {
+          throw new Error('当前任务结果不存在或已经被替换。');
+        }
+        const incoming = Array.isArray(job.stagedItems) ? job.stagedItems : [];
+        if (!incoming.length) return { ok: false, error: '当前任务没有可加入数据中心的商品结果。' };
+        const existing = await readItems();
+        const oldKeys = new Set(existing.map(itemKey));
+        const merged = mergeItems(existing, incoming);
+        const added = merged.filter(item => !oldKeys.has(itemKey(item))).length;
+        await writeItems(merged);
+        await writeJob({
+          ...job,
+          committedToDataCenter: true,
+          updatedAt: new Date().toISOString(),
+          message: `${job.message || '任务完成'} 已加入数据中心商品表。`
+        });
+        return { ok: true, count: incoming.length, added, total: merged.length };
       }
 
       case 'COLLECT_STORE_PROFILE': {
@@ -1718,10 +1824,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'EXPORT_ITEMS': {
         const settings = await readSettings();
-        const result = await runExport(await readItems(), settings, {
-          type: message.taskType || 'search',
+        const taskType = message.taskType || 'data';
+        const items = Array.isArray(message.items)
+          ? message.items.map(item => sanitizeItem(item)).filter(Boolean)
+          : taskType === 'store'
+            ? []
+            : await readItems();
+        let storeProfiles = taskType === 'store' ? await readStoreProfiles() : [];
+        if (taskType === 'store' && message.sellerUrl) {
+          const key = sellerProfileKey(message.sellerUrl);
+          if (key) storeProfiles = storeProfiles.filter(profile => sellerProfileKey(profile.sellerUrl) === key);
+        }
+        const result = await runExport(items, settings, {
+          type: taskType,
           mode: message.mode || settings.mode,
-          storeProfiles: await readStoreProfiles()
+          storeProfiles
+        });
+        return { ok: true, result };
+      }
+
+      case 'EXPORT_JOB_RESULT': {
+        const job = await readJob();
+        if (!job || (message.jobId && job.id !== message.jobId)) {
+          throw new Error('当前任务结果不存在或已经被替换。');
+        }
+        const settings = await readSettings();
+        const items = Array.isArray(job.stagedItems)
+          ? job.stagedItems
+          : itemsForJob(job, await readItems());
+        const result = await runExport(items, settings, {
+          type: job.type,
+          mode: job.mode || settings.mode,
+          storeProfiles: []
         });
         return { ok: true, result };
       }
@@ -1731,12 +1865,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const entry = history.find(item => item.id === message.id);
         if (!entry) throw new Error('找不到这条历史任务。');
         const settings = await readSettings();
-        const result = await runExport(entry.itemsSnapshot || [], settings, {
+        const isStoreHistory = entry.type === 'store';
+        const result = await runExport(isStoreHistory ? [] : (entry.itemsSnapshot || []), settings, {
           type: entry.type,
           mode: entry.mode,
-          storeProfiles: Array.isArray(entry.storeProfilesSnapshot)
+          storeProfiles: isStoreHistory && Array.isArray(entry.storeProfilesSnapshot)
             ? entry.storeProfilesSnapshot
-            : await readStoreProfiles()
+            : []
         });
         const next = history.map(item => item.id === entry.id
           ? { ...item, lastExportAt: new Date().toISOString(), fileName: result.filename }

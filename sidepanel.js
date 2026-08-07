@@ -26,6 +26,10 @@
   let currentPageType = '';
   let storeDataReady = false;
   let currentStoreStatus = { exists: false, profile: null };
+  let pendingCurrentItems = [];
+  let pendingCurrentSourceUrl = '';
+  let currentItemsCommitted = false;
+  let currentTaskJob = null;
 
   const SCREEN_META = {
     home: { kicker: 'WORKSPACE', title: '闲鱼研究助手', subtitle: '从公开详情页整理同行商品与店铺信息' },
@@ -83,6 +87,28 @@
     const node = $('status');
     node.textContent = message;
     node.className = `status ${kind}`.trim();
+  }
+
+  function renderCurrentResultActions() {
+    const hasItems = pendingCurrentItems.length > 0;
+    const commitButton = $('currentCommitButton');
+    const exportButton = $('currentExportButton');
+    const hint = $('currentCollectHint');
+    if (commitButton) {
+      commitButton.disabled = !hasItems || currentItemsCommitted;
+      commitButton.textContent = currentItemsCommitted ? '已加入数据中心商品表' : '加到数据中心商品表';
+    }
+    if (exportButton) exportButton.disabled = !hasItems;
+    if (hint && !hasItems) {
+      hint.textContent = '采集完成后可以选择：加入数据中心商品总表，或只导出当前这一条商品。';
+    }
+  }
+
+  function clearCurrentResult() {
+    pendingCurrentItems = [];
+    pendingCurrentSourceUrl = '';
+    currentItemsCommitted = false;
+    renderCurrentResultActions();
   }
 
   function renderStoreStatus(pageType, status = {}) {
@@ -235,6 +261,9 @@
   async function refreshCurrentPage() {
     const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     activeTab = tabs[0] || null;
+    if (pendingCurrentSourceUrl && activeTab?.url && pendingCurrentSourceUrl !== activeTab.url) {
+      clearCurrentResult();
+    }
     const supported = Boolean(activeTab && isGoofishUrl(activeTab.url || ''));
     const badge = $('siteBadge');
 
@@ -334,6 +363,7 @@
   function renderJob(job) {
     const rail = $('taskRail');
     const active = jobIsActive(job);
+    currentTaskJob = job || null;
     rail.dataset.active = active ? 'true' : 'false';
     rail.classList.toggle('is-complete', Boolean(job && job.status === 'completed'));
     rail.classList.toggle('is-failed', Boolean(job && ['failed', 'stopped'].includes(job.status)));
@@ -355,6 +385,10 @@
       $('stopJobButton').disabled = true;
       $('stopJobButton').textContent = '停止任务';
       $('taskExportButton').disabled = true;
+      if ($('taskCommitButton')) {
+        $('taskCommitButton').disabled = true;
+        $('taskCommitButton').textContent = '加到数据中心商品表';
+      }
       if ($('storeExportButton')) $('storeExportButton').disabled = currentPageType !== 'account' || !currentStoreStatus.exists;
       setPageButtons(Boolean(activeTab && isGoofishUrl(activeTab.url || '')));
       return;
@@ -370,7 +404,15 @@
     $('progressRing').style.setProperty('--ring-color', job.status === 'completed' ? 'var(--green)' : job.status === 'failed' ? 'var(--danger)' : 'var(--blue)');
     $('stopJobButton').disabled = !active;
     $('stopJobButton').textContent = active ? '停止任务' : '任务已结束';
-    $('taskExportButton').disabled = active || Number(job.collected || 0) === 0;
+    const stagedCount = Array.isArray(job.stagedItems) ? job.stagedItems.length : Number(job.collected || 0);
+    const hasStagedItems = stagedCount > 0;
+    $('taskExportButton').disabled = active || !hasStagedItems;
+    if ($('taskCommitButton')) {
+      $('taskCommitButton').disabled = active || !hasStagedItems || Boolean(job.committedToDataCenter);
+      $('taskCommitButton').textContent = job.committedToDataCenter
+        ? '已加入数据中心商品表'
+        : '加到数据中心商品表';
+    }
     if ($('storeExportButton')) $('storeExportButton').disabled = active || currentPageType !== 'account' || !currentStoreStatus.exists;
 
     const progress = job.type === 'links'
@@ -394,7 +436,7 @@
     lastJobId = job.id || '';
     if (active && currentScreen !== 'task' && isNewJob) showScreen('task');
 
-    const terminalKey = `${job.id}:${job.status}:${job.updatedAt}:${job.autoExportStatus || ''}`;
+    const terminalKey = `${job.id}:${job.status}:${job.updatedAt}:${job.autoExportStatus || ''}:${job.committedToDataCenter ? 'committed' : ''}`;
     if (!active && terminalKey !== lastTerminalKey) {
       lastTerminalKey = terminalKey;
       const kind = job.status === 'completed' ? 'success' : job.status === 'failed' ? 'error' : '';
@@ -423,32 +465,18 @@
         throw new Error('当前是搜索页。请打开商品详情页，或使用“搜索跨页”自动逐个采集。');
       }
       const result = await sendToTabWithRecovery(activeTab.id, {
-        type: selectedMode === 'api' ? 'START_API_CAPTURE' : 'COLLECT_CURRENT_PAGE'
+        type: selectedMode === 'api' ? 'START_API_CAPTURE' : 'COLLECT_CURRENT_PAGE',
+        persistToDataCenter: false
       });
       if (!result?.ok) throw new Error(result?.error || '采集失败');
-      let sellerEnrichment = null;
-      let sellerEnrichmentError = '';
-      const currentItem = Array.isArray(result.items) ? result.items[0] : null;
-      if (settings.collectSellerInfo !== false && currentItem?.sellerUrl) {
-        setStatus('商品已保存，正在读取卖家账号页的简介和公开评价…');
-        try {
-          sellerEnrichment = await sendRuntime({ type: 'ENRICH_SINGLE_ITEM', item: currentItem });
-          if (!sellerEnrichment?.ok) throw new Error(sellerEnrichment?.error || sellerEnrichment?.reason || '卖家账号页资料没有返回');
-        } catch (error) {
-          sellerEnrichmentError = error?.message || String(error);
-        }
-      }
-      await refreshCount();
-      const count = Number(result.count ?? result.added ?? 0);
+      pendingCurrentItems = Array.isArray(result.items) ? result.items.filter(Boolean) : [];
+      pendingCurrentSourceUrl = activeTab.url || '';
+      currentItemsCommitted = false;
+      renderCurrentResultActions();
+      const count = pendingCurrentItems.length || Number(result.count ?? result.added ?? 0);
       if (count) {
-        const suffix = sellerEnrichment?.enriched ? '，店铺简介和公开评价已补充' : '';
-        if (sellerEnrichmentError) {
-          setStatus(`当前详情页已保存 ${count} 条记录，但卖家资料补充失败：${sellerEnrichmentError}。商品详情仍已保留。`, 'warning');
-        } else if (settings.collectSellerInfo === false) {
-          setStatus(`当前详情页已采集并保存 ${count} 条记录；卖家资料补充已在设置中关闭。`, 'warning');
-        } else {
-          setStatus(`当前详情页已采集并保存 ${count} 条记录${suffix}。`, 'success');
-        }
+        $('currentCollectHint').textContent = `当前详情页采集完成：${count} 条商品结果已暂存。请选择“加到数据中心商品表”或“导出当前详情页”。店铺评价请单独进入店铺页采集。`;
+        setStatus(`当前详情页采集完成：${count} 条结果已暂存，等待你选择加入总表或单独导出。`, 'success');
       }
       else if (selectedMode === 'api') setStatus('页面没有捕获到可识别的公开详情接口；可以切换页面详情模式重试。', 'error');
       else setStatus('当前页面暂未识别到商品，请等待加载或滚动后重试。', 'error');
@@ -458,6 +486,61 @@
       button.disabled = false;
       button.textContent = '采集当前详情页';
       await refreshCurrentPage().catch(() => {});
+    }
+  }
+
+  async function commitCurrentItems() {
+    if (!pendingCurrentItems.length) {
+      setStatus('当前没有可加入数据中心的详情页结果。', 'error');
+      return;
+    }
+    const button = $('currentCommitButton');
+    if (button) button.disabled = true;
+    try {
+      const response = await sendRuntime({
+        type: 'COMMIT_ITEMS',
+        items: pendingCurrentItems,
+        sourcePage: pendingCurrentSourceUrl
+      });
+      if (!response?.ok) throw new Error(response?.error || '加入数据中心失败');
+      currentItemsCommitted = true;
+      renderCurrentResultActions();
+      await refreshCount();
+      setStatus(`已将当前详情页 ${response.count || pendingCurrentItems.length} 条结果加入数据中心商品表；新增 ${response.added || 0} 条。`, 'success');
+      $('currentCollectHint').textContent = '当前结果已经加入数据中心商品总表；仍可以点击“导出当前详情页”单独下载这一条结果。';
+    } catch (error) {
+      if (button) button.disabled = false;
+      setStatus(error.message || '加入数据中心失败。', 'error');
+    }
+  }
+
+  async function exportCurrentItems() {
+    if (!pendingCurrentItems.length) {
+      setStatus('当前没有可导出的详情页结果。', 'error');
+      return;
+    }
+    const button = $('currentExportButton');
+    if (button) {
+      button.disabled = true;
+      button.textContent = '正在生成 Excel…';
+    }
+    try {
+      const response = await sendRuntime({
+        type: 'EXPORT_ITEMS',
+        taskType: 'detail',
+        mode: selectedMode,
+        items: pendingCurrentItems
+      });
+      if (!response?.ok) throw new Error(response?.error || '当前详情页导出失败');
+      const result = response.result || {};
+      setStatus(`当前详情页 Excel 已下载：${result.itemCount || pendingCurrentItems.length} 条商品，${result.embedded || 0} 张图片已嵌入。`, result.failed ? '' : 'success');
+    } catch (error) {
+      setStatus(error.message || '当前详情页导出失败。', 'error');
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = '导出当前详情页';
+      }
     }
   }
 
@@ -670,12 +753,17 @@
 
   async function exportItems(button = $('exportButton')) {
     const isStoreExport = button.id === 'storeExportButton';
-    const idleLabel = isStoreExport ? '立即下载 Excel' : button.id === 'taskExportButton' ? '导出 Excel 数据' : '下载 Excel';
+    const idleLabel = isStoreExport ? '立即下载 Excel' : '下载 Excel';
     button.disabled = true;
     button.textContent = '正在生成 Excel…';
     setStatus('正在下载图片并生成包含真实图片的 Excel…');
     try {
-      const response = await sendRuntime({ type: 'EXPORT_ITEMS', mode: selectedMode, taskType: isStoreExport ? 'store' : undefined });
+      const response = await sendRuntime({
+        type: 'EXPORT_ITEMS',
+        mode: selectedMode,
+        taskType: isStoreExport ? 'store' : 'data',
+        sellerUrl: isStoreExport ? (activeTab?.url || '') : undefined
+      });
       if (!response?.ok) throw new Error(response?.error || '导出失败');
       const result = response.result || {};
       const details = `${result.embedded || 0} 张图片已嵌入${result.failed ? `，${result.failed} 张下载失败` : ''}`;
@@ -690,6 +778,53 @@
     } finally {
       button.disabled = isStoreExport ? (currentPageType !== 'account' || !currentStoreStatus.exists) : false;
       button.textContent = idleLabel;
+    }
+  }
+
+  async function exportTaskResult() {
+    const job = currentTaskJob;
+    if (!job?.id || jobIsActive(job)) {
+      setStatus('任务仍在处理中，完成后才能导出本次商品数据。', 'warning');
+      return;
+    }
+    const button = $('taskExportButton');
+    button.disabled = true;
+    button.textContent = '正在生成 Excel…';
+    setStatus('正在下载本次任务图片并生成独立商品 Excel…');
+    try {
+      const response = await sendRuntime({ type: 'EXPORT_JOB_RESULT', jobId: job.id });
+      if (!response?.ok) throw new Error(response?.error || '本次任务导出失败');
+      const result = response.result || {};
+      setStatus(`本次任务商品 Excel 已下载：${result.itemCount || 0} 条商品，${result.embedded || 0} 张图片已嵌入。`, result.failed ? '' : 'success');
+      await refreshHistory().catch(() => {});
+    } catch (error) {
+      setStatus(error.message || '本次任务导出失败。', 'error');
+    } finally {
+      button.disabled = !job.stagedItems?.length;
+      button.textContent = '导出本次商品数据';
+    }
+  }
+
+  async function commitTaskResult() {
+    const job = currentTaskJob;
+    if (!job?.id || jobIsActive(job)) {
+      setStatus('任务完成后才能加入数据中心商品表。', 'warning');
+      return;
+    }
+    if (!Array.isArray(job.stagedItems) || !job.stagedItems.length) {
+      setStatus('当前任务没有可加入数据中心的商品结果。', 'error');
+      return;
+    }
+    const button = $('taskCommitButton');
+    button.disabled = true;
+    try {
+      const response = await sendRuntime({ type: 'COMMIT_JOB_RESULT', jobId: job.id });
+      if (!response?.ok) throw new Error(response?.error || '加入数据中心失败');
+      setStatus(`已将本次任务 ${response.count || job.stagedItems.length} 条商品加入数据中心商品表；新增 ${response.added || 0} 条。`, 'success');
+      await Promise.all([refreshCount(), refreshJob()]);
+    } catch (error) {
+      button.disabled = false;
+      setStatus(error.message || '加入数据中心失败。', 'error');
     }
   }
 
@@ -833,6 +968,8 @@
     $('modeRpa').addEventListener('click', () => setMode('rpa'));
     $('modeApi').addEventListener('click', () => setMode('api'));
     $('collectButton').addEventListener('click', () => collectCurrentPage());
+    $('currentCommitButton').addEventListener('click', () => commitCurrentItems());
+    $('currentExportButton').addEventListener('click', () => exportCurrentItems());
     $('storeCollectButton').addEventListener('click', () => collectCurrentStorePage());
     $('storeExportButton').addEventListener('click', () => exportItems($('storeExportButton')).catch(error => setStatus(error.message, 'error')));
     $('storeDataButton').addEventListener('click', () => showScreen('data'));
@@ -841,7 +978,8 @@
     $('searchCrawlButton').addEventListener('click', () => startSearchCrawl());
     $('stopJobButton').addEventListener('click', () => stopJob());
     $('exportButton').addEventListener('click', () => exportItems($('exportButton')).catch(error => setStatus(error.message, 'error')));
-    $('taskExportButton').addEventListener('click', () => exportItems($('taskExportButton')).catch(error => setStatus(error.message, 'error')));
+    $('taskExportButton').addEventListener('click', () => exportTaskResult().catch(error => setStatus(error.message, 'error')));
+    $('taskCommitButton').addEventListener('click', () => commitTaskResult().catch(error => setStatus(error.message, 'error')));
     $('taskDataButton').addEventListener('click', () => showScreen('data'));
     $('clearButton').addEventListener('click', () => clearItems().catch(error => setStatus(error.message, 'error')));
     $('saveSettingsButton').addEventListener('click', () => saveSettings().catch(error => setStatus(error.message, 'error')));

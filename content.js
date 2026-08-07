@@ -17,6 +17,9 @@
   const networkBuffer = [];
   const rawNetworkBuffer = [];
   let captureEnabled = false;
+  // 直接详情采集和批量任务默认先暂存。后台会在任务完成后把结果交给侧边栏，
+  // 只有用户明确点击“加入数据中心商品表”时才写入长期商品主表。
+  let pagePersistToDataCenter = true;
   let scanTimer = null;
 
   function cleanText(value, maxLength = 12000) {
@@ -432,17 +435,59 @@
   function serviceTypeFromRoot(root) {
     // 闲鱼服务类商品的详情属性区会显示“服务类型：金融”等字段。
     // 这是当前商品最准确的类目来源，优先级高于可见面包屑和 URL 内部标识。
-    const labels = ['预计工期', '售后服务', '计价方式'];
+    const stopLabels = ['预计工期', '售后服务', '计价方式'];
     const detailScope = root?.querySelector?.(
       '[class^="item-main-info"], [class*="item-main-info"], [class^="item-info"], [class*=" item-info"]'
     ) || root;
+
+    function valueAfterLabel(value) {
+      const text = oneLine(value || '', 1000);
+      const labelIndex = text.indexOf('服务类型');
+      if (labelIndex < 0) return '';
+      let result = text.slice(labelIndex + '服务类型'.length)
+        .replace(/^[\s:：|｜·•\-]+/, '')
+        .trim();
+      const stopAt = stopLabels
+        .map(label => result.indexOf(label))
+        .filter(index => index >= 0);
+      if (stopAt.length) result = result.slice(0, Math.min(...stopAt));
+      return oneLine(result, 300);
+    }
+
     const rowValue = detailAttributeValue(detailScope, ['服务类型']);
-    const scopedValue = rowValue || extractLabelValue(detailScope, ['服务类型']);
-    const fallbackValue = scopedValue || (detailScope === root ? '' : extractLabelValue(root, ['服务类型']));
-    const value = oneLine(fallbackValue, 300);
-    if (!value) return '';
-    const stopAt = labels.map(label => value.indexOf(label)).filter(index => index >= 0);
-    return oneLine(stopAt.length ? value.slice(0, Math.min(...stopAt)) : value, 300);
+    if (rowValue) return oneLine(rowValue, 300);
+
+    // 页面版本变化时，服务属性行的 class 会变化，甚至没有 label/value class。
+    // 只在短小的语义节点中寻找“服务类型”，不扫描整页推荐商品的文本。
+    const nodes = [...(detailScope?.querySelectorAll?.('*') || [])]
+      .filter(node => {
+        const text = oneLine(node.textContent || '', 1000);
+        return text.includes('服务类型') && text.length <= 500;
+      })
+      .sort((first, second) => oneLine(first.textContent || '').length - oneLine(second.textContent || '').length);
+    for (const node of nodes) {
+      const value = valueAfterLabel(node.textContent || '');
+      if (value) return value;
+      const childTexts = [...(node.children || [])].map(child => oneLine(child.textContent || '', 300)).filter(Boolean);
+      const labelIndex = childTexts.findIndex(text => text.includes('服务类型'));
+      if (labelIndex >= 0) {
+        const same = valueAfterLabel(childTexts[labelIndex]);
+        if (same) return same;
+        const next = childTexts[labelIndex + 1];
+        if (next && !stopLabels.some(label => next.includes(label))) return next;
+      }
+    }
+
+    const lines = textLines(detailScope);
+    for (let index = 0; index < lines.length; index++) {
+      const value = valueAfterLabel(lines[index]);
+      if (value) return value;
+      if (/^服务类型\s*[:：|｜·•\-]?\s*$/.test(lines[index])) {
+        const next = lines[index + 1] || '';
+        if (next && !stopLabels.some(label => next.includes(label))) return oneLine(next, 300);
+      }
+    }
+    return '';
   }
 
   function extractLabelValue(root, labels) {
@@ -504,18 +549,44 @@
   }
 
   function durationFromRoot(root) {
-    const text = oneLine(root?.textContent || '', 10000);
-    const patterns = [
-      /(?:来闲鱼|开店|入驻|经营)[^\n]{0,24}(\d+年(?:\d+个月)?|\d+个月|\d+天)/,
-      /(\d+年(?:\d+个月)?|\d+个月|\d+天)[^\n]{0,24}(?:来闲鱼|开店|入驻|经营)/
-    ];
-    for (const pattern of patterns) {
-      const match = text.match(pattern);
-      if (match) return match[1];
+    const duration = '(\\d+年(?:\\d+个月)?|\\d+个月|\\d+天)';
+    const label = '(?:来闲鱼|开店(?:时长)?|入驻(?:时长)?|经营(?:时长)?)';
+
+    function fromText(value) {
+      const text = oneLine(value || '', 10000);
+      if (!text) return '';
+
+      // 只接受“来闲鱼/开店/入驻/经营”与数字直接相邻的形式。
+      // 这样“1天前来过 | 来闲鱼239天”会返回 239天，不会先截到 1天。
+      const direct = text.match(new RegExp(`${label}\\s*[:：|｜·•\\-]?\\s*${duration}`));
+      if (direct) return direct[1];
+      const reverse = text.match(new RegExp(`${duration}\\s*${label}`));
+      return reverse ? reverse[1] : '';
     }
-    const label = sellerLabelsFromRoot(root).find(value => /来闲鱼|开店时长|入驻时长|经营时长/.test(value));
-    const match = label?.match(/(\d+年(?:\d+个月)?|\d+个月|\d+天)/);
-    return match ? match[1] : extractLabelValue(root, ['开店时长', '入驻时长', '经营时长']);
+
+    // 先读卖家统计标签节点，再读语义范围内的文本行，避免在整个页面任意邻近数字中猜测。
+    for (const value of sellerLabelsFromRoot(root)) {
+      const found = fromText(value);
+      if (found) return found;
+    }
+    const labelNodes = root?.querySelectorAll?.(
+      '[class*="infoCenterText--"], [class*="item-user-info-label"], [class*="seller-info"], [data-testid*="seller"]'
+    ) || [];
+    for (const node of labelNodes) {
+      const found = fromText(node.textContent || '');
+      if (found) return found;
+    }
+
+    const lines = textLines(root);
+    for (let index = 0; index < lines.length; index++) {
+      const found = fromText(lines[index]);
+      if (found) return found;
+      if (new RegExp(`^${label}\\s*[:：]?\\s*$`).test(lines[index])) {
+        const next = lines[index + 1]?.match(new RegExp(`^${duration}$`));
+        if (next) return next[1];
+      }
+    }
+    return '';
   }
 
   function goodRateFromDetail(root) {
@@ -705,7 +776,9 @@
     const explicitScope = root?.querySelector?.(infoTopSelector);
     const structureSelector = [
       '[class^="infoCenterText--"]', '[class*=" infoCenterText--"]',
-      '[class^="bottom--"]', '[class*=" bottom--"]'
+      '[class^="bottom--"]', '[class*=" bottom--"]',
+      '[class^="intro--"]', '[class*=" intro--"]',
+      '[data-testid*="intro"]', '[data-testid*="description"]'
     ].join(', ');
 
     // infoTop 只包含昵称，地区、粉丝/关注和简介位于它的兄弟节点。
@@ -747,23 +820,32 @@
       500
     );
 
-    // 简介是否为数字不能靠格式判断。这里只接受属于账号资料容器的明确简介节点，
-    // 不再扫描整页 description，避免把商品文案、评价数或商品数量串进店铺简介。
+    // 简介是否为数字不能靠格式判断。只要节点属于账号资料容器，纯数字也可以是合法简介；
+    // 关键是排除统计、标签和评价节点，而不是用“必须包含文字”的格式规则。
     const introSelector = [
       '[class^="bottom--"]', '[class*=" bottom--"]',
       '[class^="intro--"]', '[class*=" intro--"]'
+      , '[class^="description--"]', '[class*=" description--"]',
+      '[data-testid*="intro"]', '[data-testid*="description"]'
     ].join(', ');
     const introCandidates = [];
-    // 没有可确认的账号资料容器时不猜简介；空值比把商品正文或评论节点写进店铺简介更可靠。
     const introScopes = infoScope ? [infoScope] : [];
     for (const scope of introScopes) {
-      for (const node of scope?.querySelectorAll?.(introSelector) || []) {
+      const nodes = [...(scope?.querySelectorAll?.(introSelector) || [])];
+      // 个别版本只保留了账号资料容器的匿名 class。此时只在该容器的直接子节点中
+      // 选择候选，不把商品正文、推荐商品或评价卡片纳入简介。
+      if (!nodes.length) nodes.push(...[...(scope?.children || [])]);
+      for (const node of nodes) {
         if (node.closest?.('[class^="rateItem--"], [class*=" rateItem--"]')) continue;
         const value = cleanText(node.textContent || '', 3000);
         if (!value || value.length > 3000 || value === sellerName) continue;
         if (/^(?:宝贝|信用及评价|全部|有图|好评|来自买家|来自卖家)\s*\d*$/i.test(value)) continue;
+        if (/^(?:粉丝|关注|卖出|出售)\s*\d+|^\d+\s*(?:粉丝|关注|件?宝贝)$/.test(value)) continue;
+        if (/(?:来闲鱼|开店|入驻|经营|好评率)/.test(value) && value.length < 120) continue;
         const className = oneLine(node.getAttribute?.('class') || '', 200);
-        const score = (infoScope ? 10 : 0) + (/bottom|intro/i.test(className) ? 2 : 0);
+        const score = (infoScope ? 10 : 0)
+          + (/bottom|intro|description/i.test(className) ? 4 : 0)
+          + (node.parentElement === scope ? 2 : 0);
         introCandidates.push({ value, score });
       }
       if (introCandidates.length) break;
@@ -1652,7 +1734,10 @@
     return matched.length ? matched : list.filter(item => sameDetailIdentity(item));
   }
 
-  async function sendItems(items, reason) {
+  async function sendItems(items, reason, options = {}) {
+    if (Object.prototype.hasOwnProperty.call(options, 'persistToDataCenter')) {
+      pagePersistToDataCenter = options.persistToDataCenter !== false;
+    }
     const finalItems = isDetailPage() ? finalDetailItems(items) : [];
     if (!finalItems.length) return { ok: true, count: 0, total: pageItems.size, reason, ignored: true };
     try {
@@ -1661,7 +1746,8 @@
         items: finalItems,
         sourcePage: location.href,
         pageType: pageType(),
-        reason
+        reason,
+        persistToDataCenter: pagePersistToDataCenter
       });
       return result || { ok: true, count: finalItems.length, total: pageItems.size };
     } catch (error) {
@@ -1699,9 +1785,10 @@
         return false;
       }
       captureEnabled = true;
+      pagePersistToDataCenter = message.persistToDataCenter !== false;
       Promise.resolve().then(async () => {
         const found = scanDom();
-        const result = await sendItems(found, 'manual');
+        const result = await sendItems(found, 'manual', { persistToDataCenter: pagePersistToDataCenter });
         sendResponse({
           ...result,
           pageType: pageType(),
@@ -1727,6 +1814,7 @@
       }
 
       captureEnabled = true;
+      pagePersistToDataCenter = message.persistToDataCenter !== false;
       document.dispatchEvent(new CustomEvent(API_SNAPSHOT_REQUEST));
       setTimeout(async () => {
         try {
@@ -1745,7 +1833,7 @@
             .filter(sameDetailIdentity)
             .map(item => [itemKey(item), item]));
           const found = [...foundByKey.values()];
-          const result = await sendItems(found, 'api-snapshot');
+          const result = await sendItems(found, 'api-snapshot', { persistToDataCenter: pagePersistToDataCenter });
           sendResponse({
             ...result,
             pageType: 'detail',
