@@ -430,7 +430,7 @@
 
   function serviceTypeFromRoot(root) {
     // 闲鱼服务类商品的详情属性区会显示“服务类型：金融”等字段。
-    // 这是当前商品最准确的类目来源，优先级高于面包屑和 URL categoryId。
+    // 这是当前商品最准确的类目来源，优先级高于可见面包屑和 URL 内部标识。
     const labels = ['预计工期', '售后服务', '计价方式'];
     const detailScope = root?.querySelector?.(
       '[class^="item-main-info"], [class*="item-main-info"], [class^="item-info"], [class*=" item-info"]'

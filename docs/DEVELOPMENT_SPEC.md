@@ -1,7 +1,7 @@
 # 闲鱼公开商品研究采集器｜开发文档
 
-版本：0.5.1  
-日期：2026-08-06  
+版本：0.5.2  
+日期：2026-08-07  
 实现基线：Chrome Manifest V3
 
 ## 1. 技术目标
@@ -63,13 +63,14 @@ Service Worker（任务编排、存储、通知、下载调度）
 - 维护当前页面的短期网络响应缓冲，使“开始接口观察”晚于页面请求时仍能读取最近响应。
 - 接收 `COLLECT_CURRENT_PAGE`、`START_API_CAPTURE`、`GET_SEARCH_LINKS`、`GO_NEXT_PAGE` 等消息。
 - 接收 `COLLECT_CURRENT_STORE_PAGE`，自动激活评价区域、滚动懒加载评价，并返回店铺资料与逐条评价图片。
-- 账号页解析先定位 `infoTop--*` 或包含账号统计/简介节点的昵称祖先作为资料作用域；不再在整个 `body` 中用通用 `description` 或第一个 `.num--*` 猜字段。
+- 账号页解析先从 `infoTop--*` 向上定位同时包含账号统计和简介兄弟节点的最小资料作用域；不能把只含昵称的 `infoTop` 当成完整资料区。不再在整个 `body` 中用通用 `description` 或第一个 `.num--*` 猜字段。
 - 后台打开卖家账号页后，会轮询 `GET_ACCOUNT_PROFILE`，直到关键字段连续两次生成相同快照；未稳定的骨架屏/异步中间态不会覆盖已经采集到的商品详情字段。
 - 店铺简介按语义节点保留原文，纯数字是允许的用户自定义简介；数字格式只用于明确的数量、百分比和时长字段，不作为简介过滤条件。
 - `GO_NEXT_PAGE` 优先识别闲鱼 `search-page-tiny-container` 分页器的当前页码并点击下一页码；若只有无文字右箭头，则点击右箭头；最后才兼容带“下一页”文字的旧版本控件。
 - 商品记录只通过 `COLLECT_ITEMS` 发给 service worker。
 - 店铺资料通过 `COLLECT_STORE_PROFILE` 发给 service worker；搜索列表阶段不会通过 `COLLECT_ITEMS` 写入商品主表。
-- 详情页类目解析优先调用 `serviceTypeFromRoot`，在详情属性区读取“服务类型”值；没有该属性时才回退到面包屑或 URL `categoryId`。
+- 详情页类目解析优先调用 `serviceTypeFromRoot`，在详情属性行中读取“服务类型”值，并兼容标签被拆成多个字符节点；没有公开服务类型时才使用可见面包屑，平台内部 URL `categoryId` 不直接导出为类目。
+- DOM/API/二次扫描合并使用非空字段优先策略；类目使用语义值优先策略，内部 `类目ID` 不能覆盖可见服务类型，也不会在 DOM 明确没有名称时继续冒充类目。
 
 ### 3.4 页面上下文：`main-world.js`
 
@@ -140,6 +141,7 @@ idle
 | `GET_SETTINGS` / `SAVE_SETTINGS` | 读写下载和导出设置 |
 | `GET_HISTORY` / `DELETE_HISTORY` | 读写历史任务 |
 | `GET_PAGE_SNAPSHOT` | 导出当前实时 DOM、公开响应、页面资源索引和账号页字段解析快照 |
+| `GET_STORE_STATUS` | 按当前 `/personal?userId=...` 查询本地历史店铺资料、评价数量和最近采集时间 |
 | `ENRICH_SINGLE_ITEM` | 为单个详情记录读取对应卖家账号页的公开资料 |
 | `COLLECT_STORE_PROFILE` | 保存店铺公开资料、评价和评价图片索引 |
 
