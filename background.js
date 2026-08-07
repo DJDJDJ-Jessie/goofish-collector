@@ -106,6 +106,8 @@ function sanitizeItem(input, sourcePage = '') {
   if (!item.sourcePage && sourcePage) item.sourcePage = cleanUrl(sourcePage);
   if (!item.collectedAt) item.collectedAt = new Date().toISOString();
   if (!item.dataSource) item.dataSource = 'dom';
+  // 兼容旧版本已经保存的内部类目编号：导出前自动清掉，避免用户必须先手动清空全部数据。
+  if (isInternalCategory(item.category)) item.category = '';
   item.itemGoodRate = rateText(item.itemGoodRate || item.goodRate || item.reviewSummary || '');
   item.sellerIntro = publicIntroText(item.sellerIntro, 3000);
 
