@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>闲鱼研究采集器</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="header">
+        <div>
+          <p class="eyebrow">PUBLIC MARKET RESEARCH</p>
+          <h1>闲鱼研究采集器</h1>
+        </div>
+        <span id="siteBadge" class="badge">检查页面中</span>
+      </header>
+
+      <section class="panel current-page">
+        <div class="section-heading">
+          <div>
+            <h2>当前页面</h2>
+            <p id="pageTitle" class="muted">正在读取当前标签页…</p>
+          </div>
+          <span id="pageType" class="page-type">—</span>
+        </div>
+        <button id="collectButton" class="button primary" type="button">采集当前详情页</button>
+        <p class="hint">最终写入 Excel 的是商品详情页记录。当前页面模式只采集已打开的详情页；如果当前是搜索页，请使用下面的跨页采集，让插件逐个打开商品详情页。</p>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <h2>批量商品链接</h2>
+            <p class="muted">一行一个商品详情链接</p>
+          </div>
+        </div>
+        <textarea id="linkInput" class="link-input" rows="4" placeholder="https://www.goofish.com/item?id=…&#10;https://www.goofish.com/item?id=…"></textarea>
+        <button id="batchLinkButton" class="button secondary" type="button">批量采集这些链接</button>
+        <p class="hint">插件会打开一个专用标签页，逐个进入链接并采集页面上可见的商品、文案和店铺信息；不会改动你当前正在浏览的标签页。</p>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <h2>搜索页跨页采集</h2>
+            <p class="muted">从当前闲鱼搜索结果页开始</p>
+          </div>
+          <span id="jobBadge" class="page-type">无任务</span>
+        </div>
+        <div class="field-grid">
+          <label>目标商品数<input id="targetCount" type="number" min="1" max="2000" value="100" /></label>
+          <label>最多采集页数<input id="maxPages" type="number" min="1" max="100" value="10" /></label>
+        </div>
+        <button id="searchCrawlButton" class="button secondary" type="button">逐个打开详情页并跨页采集</button>
+        <button id="stopJobButton" class="button ghost" type="button" disabled>停止批量任务</button>
+        <p id="jobStatus" class="hint">搜索页只用于发现商品链接，不会作为最终记录保存；插件会逐个打开详情页。每页约 40 条时，目标 100 条会跨约 3 页并访问 100 个详情页。</p>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <h2>本机数据</h2>
+            <p class="muted">只保存在此浏览器的扩展存储中</p>
+          </div>
+          <strong id="itemCount" class="count">0</strong>
+        </div>
+        <div class="actions">
+          <button id="exportButton" class="button secondary" type="button">导出 Excel（内嵌图片）</button>
+          <button id="clearButton" class="button ghost" type="button">清空数据</button>
+        </div>
+        <div class="image-settings">
+          <label for="imageLimit">每个商品嵌入图片</label>
+          <select id="imageLimit">
+            <option value="0" selected>全部（总计最多 1000 张）</option>
+            <option value="3">最多 3 张</option>
+            <option value="5">最多 5 张</option>
+            <option value="10">最多 10 张</option>
+          </select>
+        </div>
+        <p class="hint">导出时会下载图片并写入 Excel 文件。文件名格式为“商品标题_店铺名_图序号”，不再只保存图片链接。</p>
+      </section>
+
+      <section class="notice">
+        <strong>采集边界</strong>
+        <p>本版本只处理闲鱼页面公开可见或页面已加载的商品资料，不读取聊天、不上传数据、不绕过验证码或访问限制。导出时会把成功下载的真实图片嵌入 Excel。</p>
+      </section>
+
+      <p id="status" class="status" role="status">准备就绪</p>
+    </main>
+    <script src="xlsx.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

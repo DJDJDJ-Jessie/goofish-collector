@@ -1,0 +1,813 @@
+(() => {
+  'use strict';
+
+  const $ = id => document.getElementById(id);
+  const DEFAULT_SETTINGS = {
+    mode: 'rpa',
+    downloadMode: 'manual',
+    downloadFolder: '闲鱼研究采集',
+    fileNameTemplate: '闲鱼商品研究-{date}-{count}',
+    saveAs: false,
+    imageLimit: 0,
+    maxEmbedImages: 1000,
+    collectSellerInfo: true,
+    notifyOnComplete: true,
+    keepHistoryDays: 30
+  };
+
+  let activeTab = null;
+  let settings = { ...DEFAULT_SETTINGS };
+  let selectedMode = 'rpa';
+  let lastTerminalKey = '';
+  let lastJobId = '';
+  let currentScreen = 'home';
+  let screenParent = 'home';
+  let currentPageType = '';
+  let storeDataReady = false;
+
+  const SCREEN_META = {
+    home: { kicker: 'WORKSPACE', title: '闲鱼研究助手', subtitle: '从公开详情页整理同行商品与店铺信息' },
+    detail: { kicker: 'CURRENT DETAIL', title: '采集当前详情', subtitle: '读取此刻打开的商品详情页' },
+    store: { kicker: 'CURRENT STORE', title: '采集当前店铺页', subtitle: '读取店铺资料、评价和评价图片' },
+    links: { kicker: 'BATCH INPUT', title: '批量商品链接', subtitle: '自动逐个打开商品详情页' },
+    search: { kicker: 'SEARCH CRAWL', title: '搜索跨页采集', subtitle: '按页码推进，并逐个进入详情页' },
+    data: { kicker: 'LOCAL DATASET', title: '数据中心', subtitle: '查看记录、下载 Excel 和图片索引' },
+    history: { kicker: 'TASK ARCHIVE', title: '采集历史', subtitle: '查看任务结果，重新导出或删除' },
+    settings: { kicker: 'WORKSPACE SETTINGS', title: '下载与字段设置', subtitle: '控制下载方式、图片和卖家公开资料' },
+    task: { kicker: 'TASK RUNNER', title: '处理任务', subtitle: '查看逐个详情页的采集进度' }
+  };
+
+  function showScreen(name, push = true, parent = '') {
+    const target = SCREEN_META[name] ? name : 'home';
+    if (target === currentScreen && !$(`screen-${target}`)?.classList.contains('is-active')) {
+      // Continue below so a partially rendered screen can still be repaired.
+    } else if (target === currentScreen && $(`screen-${target}`)?.classList.contains('is-active')) {
+      updateScreenChrome(target);
+      return;
+    }
+
+    if (push && currentScreen !== target) {
+      // 一级功能页统一回首页，只有“任务 → 数据中心”保留一个明确的返回关系。
+      // 不再累积历史栈，避免设置页、详情页之间来回跳转。
+      screenParent = parent || (target === 'data' && currentScreen === 'task' ? 'task' : 'home');
+    }
+    currentScreen = target;
+    document.querySelectorAll('[data-screen]').forEach(screen => {
+      screen.classList.toggle('is-active', screen.dataset.screen === target);
+    });
+    updateScreenChrome(target);
+  }
+
+  function updateScreenChrome(name = currentScreen) {
+    const meta = SCREEN_META[name] || SCREEN_META.home;
+    $('screenKicker').textContent = meta.kicker;
+    $('screenTitle').textContent = meta.title;
+    $('screenSubtitle').textContent = meta.subtitle;
+    $('backButton').classList.toggle('is-hidden', name === 'home');
+    $('modePanel').classList.toggle('is-hidden', !['detail', 'links', 'search'].includes(name));
+  }
+
+  function goBack() {
+    const previous = screenParent || 'home';
+    screenParent = 'home';
+    showScreen(previous, false);
+  }
+
+  function isGoofishUrl(url) {
+    try { return new URL(url).hostname.endsWith('goofish.com'); } catch (_) { return false; }
+  }
+
+  function setStatus(message, kind = '') {
+    const node = $('status');
+    node.textContent = message;
+    node.className = `status ${kind}`.trim();
+  }
+
+  function sendRuntime(message) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(message, response => {
+        const error = chrome.runtime.lastError;
+        if (error) reject(new Error(error.message));
+        else resolve(response);
+      });
+    });
+  }
+
+  function sendToTab(tabId, message) {
+    return new Promise((resolve, reject) => {
+      chrome.tabs.sendMessage(tabId, message, response => {
+        const error = chrome.runtime.lastError;
+        if (error) reject(new Error(error.message));
+        else resolve(response);
+      });
+    });
+  }
+
+  function executeScript(details) {
+    return new Promise((resolve, reject) => {
+      chrome.scripting.executeScript(details, result => {
+        const error = chrome.runtime.lastError;
+        if (error) reject(new Error(error.message));
+        else resolve(result);
+      });
+    });
+  }
+
+  async function sendToTabWithRecovery(tabId, message) {
+    try {
+      return await sendToTab(tabId, message);
+    } catch (firstError) {
+      try {
+        await executeScript({ target: { tabId }, world: 'MAIN', files: ['main-world.js'] }).catch(() => {});
+        await executeScript({ target: { tabId }, world: 'ISOLATED', files: ['content.js'] });
+        return await sendToTab(tabId, message);
+      } catch (secondError) {
+        throw new Error(secondError?.message || firstError?.message || '无法连接当前闲鱼页面，请刷新页面后重试。');
+      }
+    }
+  }
+
+  function modeLabel(mode = selectedMode) {
+    return mode === 'api' ? '接口观察模式' : '页面详情模式';
+  }
+
+  function modeHint(mode = selectedMode) {
+    return mode === 'api'
+      ? '观察当前详情页已经公开收到的 JSON/接口响应，并与页面内容合并。'
+      : '读取详情页已经展示的商品文案、图片和店铺信息。';
+  }
+
+  function setMode(mode, persist = true) {
+    selectedMode = mode === 'api' ? 'api' : 'rpa';
+    $('modeRpa').classList.toggle('is-selected', selectedMode === 'rpa');
+    $('modeApi').classList.toggle('is-selected', selectedMode === 'api');
+    $('modeRpa').setAttribute('aria-pressed', selectedMode === 'rpa');
+    $('modeApi').setAttribute('aria-pressed', selectedMode === 'api');
+    $('modeTitle').textContent = modeLabel();
+    $('modeHint').textContent = modeHint();
+    if (persist) {
+      settings = { ...settings, mode: selectedMode };
+      void sendRuntime({ type: 'SAVE_SETTINGS', settings }).catch(() => {});
+    }
+  }
+
+  function setPageButtons(supported, pageType = currentPageType) {
+    const active = Boolean($('taskRail').dataset.active === 'true');
+    $('collectButton').disabled = !supported || pageType !== 'detail' || active;
+    $('storeCollectButton').disabled = !supported || pageType !== 'account' || active;
+    $('diagnosticButton').disabled = !supported;
+    $('batchLinkButton').disabled = active;
+    $('searchCrawlButton').disabled = !supported || pageType !== 'search' || active;
+  }
+
+  function updateHomePageContext({ supported = false, pageType = '', title = '', url = '' } = {}) {
+    const badge = $('homeSiteState');
+    if (!supported) {
+      currentPageType = '';
+      badge.className = 'status-dot warn';
+      badge.innerHTML = '<span></span>请打开闲鱼';
+      $('homePageName').textContent = title || '当前标签页不是 goofish.com';
+      $('homePageHint').textContent = url || '打开闲鱼后，可直接从这里开始采集。';
+      $('homePageKind').textContent = '不可用';
+      return;
+    }
+
+    badge.className = 'status-dot ok';
+    badge.innerHTML = '<span></span>闲鱼页面';
+    $('homePageName').textContent = title || '闲鱼页面';
+    $('homePageHint').textContent = url || '页面地址读取中…';
+    $('homePageKind').textContent = pageType === 'detail' ? '详情页' : pageType === 'account' ? '账号页' : '搜索页';
+  }
+
+  async function refreshCurrentPage() {
+    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    activeTab = tabs[0] || null;
+    const supported = Boolean(activeTab && isGoofishUrl(activeTab.url || ''));
+    const badge = $('siteBadge');
+
+    if (!supported) {
+      badge.className = 'status-dot warn';
+      badge.innerHTML = '<span></span>请打开闲鱼';
+      $('pageTitle').textContent = '当前标签页不是 goofish.com';
+      $('pageUrl').textContent = activeTab?.url || '—';
+      $('pageType').textContent = '不可用';
+      $('currentState').textContent = '无法采集';
+      $('storeSiteBadge').className = 'status-dot warn';
+      $('storeSiteBadge').innerHTML = '<span></span>请打开闲鱼';
+      $('storePageTitle').textContent = '当前标签页不是 goofish.com';
+      $('storePageUrl').textContent = activeTab?.url || '—';
+      $('storePageType').textContent = '不可用';
+      $('storeCurrentState').textContent = '无法采集';
+      updateHomePageContext({ title: $('pageTitle').textContent, url: $('pageUrl').textContent });
+      setPageButtons(false);
+      return;
+    }
+
+    badge.className = 'status-dot ok';
+    badge.innerHTML = '<span></span>闲鱼页面';
+    $('pageTitle').textContent = activeTab.title || '正在读取页面…';
+    $('pageUrl').textContent = activeTab.url || '—';
+    $('storePageTitle').textContent = activeTab.title || '正在读取页面…';
+    $('storePageUrl').textContent = activeTab.url || '—';
+
+    try {
+      const page = await sendToTabWithRecovery(activeTab.id, { type: 'GET_PAGE_INFO' });
+      currentPageType = page?.pageType || '';
+      const pageType = page?.pageType === 'detail' ? '详情页' : page?.pageType === 'account' ? '账号页' : '搜索页';
+      $('pageTitle').textContent = page?.title || activeTab.title || activeTab.url;
+      $('pageUrl').textContent = page?.url || activeTab.url;
+      $('pageType').textContent = pageType;
+      $('currentState').textContent = page?.pageType === 'detail' ? '可采集' : page?.pageType === 'account' ? '账号资料页' : '请进入详情';
+      $('storeSiteBadge').className = 'status-dot ok';
+      $('storeSiteBadge').innerHTML = '<span></span>闲鱼页面';
+      $('storePageTitle').textContent = page?.title || activeTab.title || activeTab.url;
+      $('storePageUrl').textContent = page?.url || activeTab.url;
+      $('storePageType').textContent = page?.pageType === 'account' ? '店铺页' : page?.pageType === 'detail' ? '详情页' : '搜索页';
+      $('storeCurrentState').textContent = page?.pageType === 'account' ? '可采集' : '请进入店铺页';
+      updateHomePageContext({
+        supported: true,
+        pageType: page?.pageType || 'search',
+        title: $('pageTitle').textContent,
+        url: $('pageUrl').textContent
+      });
+      setPageButtons(true, page?.pageType || 'search');
+    } catch (error) {
+      currentPageType = '';
+      $('pageType').textContent = '待刷新';
+      $('currentState').textContent = '待连接';
+      $('storeSiteBadge').className = 'status-dot warn';
+      $('storeSiteBadge').innerHTML = '<span></span>待连接';
+      $('storePageTitle').textContent = activeTab.title || '闲鱼页面';
+      $('storePageUrl').textContent = activeTab.url || '—';
+      $('storePageType').textContent = '待刷新';
+      $('storeCurrentState').textContent = '待连接';
+      updateHomePageContext({ supported: true, pageType: '', title: activeTab.title || '闲鱼页面', url: activeTab.url });
+      setPageButtons(true);
+      setStatus(error.message || '暂时无法连接页面；请刷新闲鱼页面后重试。', 'error');
+    }
+  }
+
+  async function refreshCount() {
+    const response = await sendRuntime({ type: 'GET_STATUS' });
+    if (!response?.ok) throw new Error(response?.error || '读取数据数量失败');
+    $('itemCount').textContent = response.count;
+    $('dataNumber').textContent = response.count;
+    $('homeItemCount').textContent = response.count;
+    $('storeCount').textContent = response.storeCount || 0;
+    storeDataReady = Number(response.storeCount || 0) > 0;
+    const storeExportButton = $('storeExportButton');
+    if (storeExportButton) {
+      storeExportButton.disabled = !storeDataReady || $('taskRail')?.dataset.active === 'true';
+    }
+  }
+
+  function jobIsActive(job) {
+    return Boolean(job && !['completed', 'stopped', 'failed'].includes(job.status));
+  }
+
+  function jobProgress(job) {
+    if (!job) return 0;
+    if (job.type === 'links') {
+      const total = Math.max(1, job.links?.length || 0);
+      return Math.min(100, Math.round((Number(job.index || 0) / total) * 100));
+    }
+    const total = Math.max(1, Number(job.targetCount || 0));
+    return Math.min(100, Math.round((Number(job.visited || 0) / total) * 100));
+  }
+
+  function renderJob(job) {
+    const rail = $('taskRail');
+    const active = jobIsActive(job);
+    rail.dataset.active = active ? 'true' : 'false';
+    rail.classList.toggle('is-complete', Boolean(job && job.status === 'completed'));
+    rail.classList.toggle('is-failed', Boolean(job && ['failed', 'stopped'].includes(job.status)));
+
+    if (!job) {
+      lastJobId = '';
+      $('jobBadge').textContent = '当前任务';
+      $('jobHeadline').textContent = '没有活动任务';
+      $('jobStatus').textContent = '任务状态会显示在这里。';
+      $('jobProgressText').textContent = '0%';
+      $('progressRing').style.setProperty('--progress', '0%');
+      $('taskCountText').textContent = '准备开始';
+      $('taskModeText').textContent = '—';
+      $('taskTypeText').textContent = '—';
+      $('taskCreatedText').textContent = '—';
+      $('taskStateText').textContent = '—';
+      $('taskFilterText').textContent = '当前未进行任何筛选';
+      $('homeTaskHint').textContent = '查看当前任务进度和完成结果';
+      $('stopJobButton').disabled = true;
+      $('stopJobButton').textContent = '停止任务';
+      $('taskExportButton').disabled = true;
+      if ($('storeExportButton')) $('storeExportButton').disabled = !storeDataReady;
+      setPageButtons(Boolean(activeTab && isGoofishUrl(activeTab.url || '')));
+      return;
+    }
+
+    const typeText = job.type === 'links' ? '链接批量' : '搜索跨页';
+    const stateText = active ? '正在处理' : job.status === 'completed' ? '处理完成' : job.status === 'stopped' ? '已停止' : '处理失败';
+    const percent = jobProgress(job);
+    $('jobBadge').textContent = `${typeText} · ${job.mode === 'api' ? 'API 模式' : '详情模式'}`;
+    $('jobHeadline').textContent = stateText;
+    $('jobProgressText').textContent = `${percent}%`;
+    $('progressRing').style.setProperty('--progress', `${percent}%`);
+    $('progressRing').style.setProperty('--ring-color', job.status === 'completed' ? 'var(--green)' : job.status === 'failed' ? 'var(--danger)' : 'var(--blue)');
+    $('stopJobButton').disabled = !active;
+    $('stopJobButton').textContent = active ? '停止任务' : '任务已结束';
+    $('taskExportButton').disabled = active || Number(job.collected || 0) === 0;
+    if ($('storeExportButton')) $('storeExportButton').disabled = active || !storeDataReady;
+
+    const progress = job.type === 'links'
+      ? `详情链接 ${Math.min(Number(job.index || 0), job.links?.length || 0)}/${job.links?.length || 0}，成功 ${job.collected || 0} 条`
+      : `详情页 ${job.visited || 0}/${job.targetCount || 0}，成功 ${job.collected || 0} 条，搜索页 ${job.pagesProcessed || 0}/${job.maxPages || 0}`;
+    const failures = job.failures?.length ? `，失败 ${job.failures.length} 个` : '';
+    const sellerFailures = job.sellerFailures?.length ? `，店铺资料失败 ${job.sellerFailures.length} 个` : '';
+    $('jobStatus').textContent = `${job.message || '任务处理中'}（${progress}${failures}${sellerFailures}）`;
+    $('taskCountText').textContent = progress;
+    $('taskModeText').textContent = job.mode === 'api' ? 'API 模式' : '页面详情模式';
+    $('taskTypeText').textContent = job.type === 'links' ? `商品详情 · ${job.links?.length || 0} 个` : `搜索详情 · ${job.targetCount || 0} 条`;
+    $('taskCreatedText').textContent = formatDate(job.createdAt);
+    $('taskStateText').textContent = stateText;
+    $('taskFilterText').textContent = failures || sellerFailures ? `已记录${failures}${sellerFailures}` : '当前未进行任何筛选';
+    $('homeTaskHint').textContent = `${stateText} · ${job.collected || 0} 条成功记录`;
+    $('currentState').textContent = active ? '任务运行中' : stateText;
+    setPageButtons(Boolean(activeTab && isGoofishUrl(activeTab.url || '')));
+    $('collectButton').disabled = active;
+
+    const isNewJob = job.id && job.id !== lastJobId;
+    lastJobId = job.id || '';
+    if (active && currentScreen !== 'task' && isNewJob) showScreen('task');
+
+    const terminalKey = `${job.id}:${job.status}:${job.updatedAt}:${job.autoExportStatus || ''}`;
+    if (!active && terminalKey !== lastTerminalKey) {
+      lastTerminalKey = terminalKey;
+      const kind = job.status === 'completed' ? 'success' : job.status === 'failed' ? 'error' : '';
+      setStatus(job.message || `任务${stateText}。`, kind);
+      void refreshCount().catch(() => {});
+      void refreshHistory().catch(() => {});
+    }
+  }
+
+  async function refreshJob() {
+    const response = await sendRuntime({ type: 'GET_JOB_STATUS' });
+    if (!response?.ok) throw new Error(response?.error || '读取任务状态失败');
+    renderJob(response.job);
+  }
+
+  async function collectCurrentPage() {
+    if (!activeTab?.id) return;
+    const button = $('collectButton');
+    button.disabled = true;
+    button.textContent = selectedMode === 'api' ? '正在读取公开接口…' : '正在读取页面…';
+    setStatus(`正在使用${modeLabel()}整理当前详情…`);
+
+    try {
+      const page = await sendToTabWithRecovery(activeTab.id, { type: 'GET_PAGE_INFO' });
+      if (!page?.ok || page.pageType !== 'detail') {
+        throw new Error('当前是搜索页。请打开商品详情页，或使用“搜索跨页”自动逐个采集。');
+      }
+      const result = await sendToTabWithRecovery(activeTab.id, {
+        type: selectedMode === 'api' ? 'START_API_CAPTURE' : 'COLLECT_CURRENT_PAGE'
+      });
+      if (!result?.ok) throw new Error(result?.error || '采集失败');
+      let sellerEnrichment = null;
+      const currentItem = Array.isArray(result.items) ? result.items[0] : null;
+      if (settings.collectSellerInfo !== false && currentItem?.sellerUrl) {
+        setStatus('商品已保存，正在读取卖家账号页的简介和公开评价…');
+        sellerEnrichment = await sendRuntime({ type: 'ENRICH_SINGLE_ITEM', item: currentItem }).catch(() => null);
+      }
+      await refreshCount();
+      const count = Number(result.count ?? result.added ?? 0);
+      if (count) {
+        const suffix = sellerEnrichment?.enriched ? '，店铺简介和公开评价已补充' : '';
+        setStatus(`当前详情页已采集并保存 ${count} 条记录${suffix}。`, 'success');
+      }
+      else if (selectedMode === 'api') setStatus('页面没有捕获到可识别的公开详情接口；可以切换页面详情模式重试。', 'error');
+      else setStatus('当前页面暂未识别到商品，请等待加载或滚动后重试。', 'error');
+    } catch (error) {
+      setStatus(error.message || '采集失败，请刷新闲鱼页面后重试。', 'error');
+    } finally {
+      button.disabled = false;
+      button.textContent = '采集当前详情页';
+      await refreshCurrentPage().catch(() => {});
+    }
+  }
+
+  async function collectCurrentStorePage() {
+    if (!activeTab?.id) return;
+    const button = $('storeCollectButton');
+    button.disabled = true;
+    button.textContent = '正在加载全部公开评价…';
+    $('storeCollectHint').textContent = '正在读取店铺资料并滚动评价区域，请保持当前店铺页打开。';
+    setStatus('正在采集当前店铺页的公开资料、评价和评价图片…');
+
+    try {
+      const page = await sendToTabWithRecovery(activeTab.id, { type: 'GET_PAGE_INFO' });
+      if (!page?.ok || page.pageType !== 'account') {
+        throw new Error('当前不是闲鱼店铺/账号页，请先打开卖家账号页。');
+      }
+      const result = await sendToTabWithRecovery(activeTab.id, { type: 'COLLECT_CURRENT_STORE_PAGE' });
+      if (!result?.ok) throw new Error(result?.error || '店铺页采集失败');
+      await refreshCount();
+      const reviewCount = Number(result.reviewCount || result.reviewCountLoaded || result.reviews?.length || 0);
+      storeDataReady = true;
+      $('storeExportButton').disabled = false;
+      setStatus(`当前店铺页已采集完成：保存 1 份店铺资料，读取 ${reviewCount} 条公开评价；评价图片会随 Excel 一起下载。`, 'success');
+      $('storeCollectHint').textContent = `已读取 ${reviewCount} 条评价；可以直接点击“立即下载 Excel”，也可以打开数据中心查看当前数据。`;
+    } catch (error) {
+      setStatus(error.message || '店铺页采集失败，请刷新账号页后重试。', 'error');
+      $('storeCollectHint').textContent = '如果评价区仍在加载，请停留几秒后重试。';
+    } finally {
+      button.disabled = false;
+      button.textContent = '采集当前店铺页';
+      await refreshCurrentPage().catch(() => {});
+    }
+  }
+
+  function diagnosticJson(value) {
+    return JSON.stringify(value ?? null, null, 2);
+  }
+
+  function diagnosticFilePart(value, fallback = '页面') {
+    const cleaned = String(value || fallback)
+      .replace(/[\\/:*?"<>|]+/g, '_')
+      .replace(/\s+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^[_\.\-]+|[_\.\-]+$/g, '')
+      .slice(0, 80);
+    return cleaned || fallback;
+  }
+
+  function dataUrlToBytes(dataUrl) {
+    const base64 = String(dataUrl || '').split(',')[1] || '';
+    if (!base64 || typeof atob !== 'function') return new Uint8Array();
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  }
+
+  function downloadBlob(blob, filename, saveAs = true) {
+    const url = URL.createObjectURL(blob);
+    return new Promise((resolve, reject) => {
+      chrome.downloads.download({ url, filename, saveAs }, id => {
+        const error = chrome.runtime.lastError;
+        if (error) reject(new Error(error.message));
+        else resolve(id);
+      });
+    }).finally(() => {
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    });
+  }
+
+  async function exportDiagnosticPackage() {
+    if (!activeTab?.id || !isGoofishUrl(activeTab.url || '')) {
+      setStatus('请先打开闲鱼详情页或搜索页，再导出诊断包。', 'error');
+      return;
+    }
+
+    const button = $('diagnosticButton');
+    button.disabled = true;
+    button.textContent = '正在提取当前页面…';
+    setStatus('正在自动提取实时 DOM、图片、链接和公开接口响应…');
+
+    try {
+      const snapshot = await sendToTabWithRecovery(activeTab.id, { type: 'GET_PAGE_SNAPSHOT' });
+      if (!snapshot?.ok) throw new Error(snapshot?.error || '页面样本提取失败');
+
+      let screenshot = '';
+      try {
+        screenshot = await chrome.tabs.captureVisibleTab(activeTab.windowId, { format: 'png' });
+      } catch (_) {
+        // 某些浏览器/窗口不允许扩展截取当前页，诊断包仍然可以正常生成。
+      }
+
+      const capturedAt = snapshot.capturedAt || new Date().toISOString();
+      const files = [
+        {
+          name: 'README.txt',
+          data: [
+            '这是由闲鱼公开商品研究采集器自动生成的页面诊断包。',
+            '包含当前动态 DOM、可见文字、链接、图片地址、当前字段解析快照和经过字段脱敏的公开接口响应。',
+            '请在上传前快速检查是否包含你不希望分享的昵称、地址或其它个人信息。',
+            `生成时间：${capturedAt}`
+          ].join('\n')
+        },
+        {
+          name: 'page-info.json',
+          data: diagnosticJson({
+            ...snapshot.page,
+            capturedAt,
+            normalizedItemCount: snapshot.normalizedItems?.length || 0,
+            networkResponseCount: snapshot.networkResponseCount || 0
+          })
+        },
+        { name: 'live-dom.html', data: snapshot.html || '' },
+        { name: 'visible-text.txt', data: snapshot.visibleText || '' },
+        { name: 'links.json', data: diagnosticJson(snapshot.links || []) },
+        { name: 'image-urls.json', data: diagnosticJson(snapshot.images || []) },
+        { name: 'normalized-items.json', data: diagnosticJson(snapshot.normalizedItems || []) },
+        { name: 'account-profile.json', data: diagnosticJson(snapshot.accountProfile || {}) },
+        { name: 'network-responses.json', data: diagnosticJson(snapshot.networkResponses || []) }
+      ];
+      if (screenshot) files.push({ name: 'screenshot.png', data: dataUrlToBytes(screenshot) });
+
+      const blob = window.XianyuDiagnostic.createZip(files);
+      const date = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const pageKind = snapshot.page?.pageType === 'detail'
+        ? '详情页'
+        : snapshot.page?.pageType === 'account' ? '账号页' : '搜索页';
+      const filename = `闲鱼研究采集/页面诊断-${diagnosticFilePart(pageKind)}-${date}.zip`;
+      await downloadBlob(blob, filename, true);
+
+      const suffix = snapshot.page?.htmlTruncated ? '（DOM 较大，已按上限截取）' : '';
+      setStatus(`页面诊断包已下载${suffix}，请直接把 ZIP 上传给我。`, 'success');
+    } catch (error) {
+      setStatus(error.message || '诊断包生成失败，请刷新闲鱼页面后重试。', 'error');
+    } finally {
+      button.disabled = false;
+      button.textContent = '一键导出页面诊断包';
+    }
+  }
+
+  function parseProductLinks(value) {
+    return [...new Set(String(value || '')
+      .split(/[\s,]+/)
+      .map(text => text.trim())
+      .filter(Boolean)
+      .filter(isGoofishUrl))];
+  }
+
+  async function startLinkBatch() {
+    const links = parseProductLinks($('linkInput').value);
+    if (!links.length) {
+      setStatus('请先粘贴至少一个有效的闲鱼商品详情链接。', 'error');
+      showScreen('links');
+      return;
+    }
+    try {
+      const response = await sendRuntime({ type: 'START_BATCH_LINKS', links, mode: selectedMode, delayMs: 1800 });
+      if (!response?.ok) throw new Error(response?.error || '启动链接批量采集失败');
+      $('linkInput').value = '';
+      setStatus(`已启动 ${links.length} 个链接的自动详情采集。`, 'success');
+      showScreen('task');
+      await refreshJob();
+    } catch (error) {
+      setStatus(error.message || '启动批量采集失败。', 'error');
+      await refreshJob().catch(() => {});
+    }
+  }
+
+  async function startSearchCrawl() {
+    if (!activeTab?.id || !isGoofishUrl(activeTab.url || '')) {
+      setStatus('请先打开闲鱼搜索结果页。', 'error');
+      return;
+    }
+    if ($('pageType').textContent !== '搜索页') {
+      setStatus('当前不是搜索结果页，请切换到搜索结果页后再启动跨页采集。', 'error');
+      return;
+    }
+    const targetCount = Math.max(1, Number($('targetCount').value || 0));
+    const maxPages = Math.max(1, Number($('maxPages').value || 0));
+    try {
+      const response = await sendRuntime({
+        type: 'START_SEARCH_CRAWL',
+        startUrl: activeTab.url,
+        targetCount,
+        maxPages,
+        mode: selectedMode,
+        delayMs: 2200
+      });
+      if (!response?.ok) throw new Error(response?.error || '启动搜索跨页采集失败');
+      setStatus(`已启动自动跨页采集：目标 ${targetCount} 条，最多 ${maxPages} 页。`, 'success');
+      showScreen('task');
+      await refreshJob();
+    } catch (error) {
+      setStatus(error.message || '启动跨页采集失败。', 'error');
+      await refreshJob().catch(() => {});
+    }
+  }
+
+  async function stopJob() {
+    try {
+      const response = await sendRuntime({ type: 'STOP_JOB' });
+      if (!response?.ok) throw new Error(response?.error || '停止任务失败');
+      setStatus('任务已停止，已经采集的数据仍保留在本机。', 'success');
+      await refreshJob();
+    } catch (error) {
+      setStatus(error.message || '停止任务失败。', 'error');
+    }
+  }
+
+  async function exportItems(button = $('exportButton')) {
+    const isStoreExport = button.id === 'storeExportButton';
+    const idleLabel = isStoreExport ? '立即下载 Excel' : button.id === 'taskExportButton' ? '导出 Excel 数据' : '下载 Excel';
+    button.disabled = true;
+    button.textContent = '正在生成 Excel…';
+    setStatus('正在下载图片并生成包含真实图片的 Excel…');
+    try {
+      const response = await sendRuntime({ type: 'EXPORT_ITEMS', mode: selectedMode, taskType: isStoreExport ? 'store' : undefined });
+      if (!response?.ok) throw new Error(response?.error || '导出失败');
+      const result = response.result || {};
+      const details = `${result.embedded || 0} 张图片已嵌入${result.failed ? `，${result.failed} 张下载失败` : ''}`;
+      if (isStoreExport) {
+        setStatus(`店铺资料 Excel 已下载：包含 ${result.storeCount || 0} 个店铺、${result.reviewCount || 0} 条评价；${details}。`, result.failed ? '' : 'success');
+      } else {
+        setStatus(`已下载 ${result.itemCount || 0} 条记录；${details}。`, result.failed ? '' : 'success');
+      }
+      await refreshHistory().catch(() => {});
+    } catch (error) {
+      setStatus(error.message || '导出失败，请稍后重试。', 'error');
+    } finally {
+      button.disabled = isStoreExport ? !storeDataReady : false;
+      button.textContent = idleLabel;
+    }
+  }
+
+  async function clearItems() {
+    if (!confirm('确定清空当前已采集数据吗？历史任务不会被删除。')) return;
+    const response = await sendRuntime({ type: 'CLEAR_ITEMS' });
+    if (!response?.ok) throw new Error(response?.error || '清空失败');
+    await refreshCount();
+    setStatus('当前数据已清空，历史任务仍然保留。', 'success');
+  }
+
+  function formatDate(value) {
+    const time = Date.parse(value || '');
+    if (!time) return '时间未知';
+    return new Date(time).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  }
+
+  function historyType(entry) {
+    return entry.type === 'links' ? '链接批量' : '搜索跨页';
+  }
+
+  async function refreshHistory() {
+    const response = await sendRuntime({ type: 'GET_HISTORY' });
+    if (!response?.ok) throw new Error(response?.error || '读取历史失败');
+    const list = $('historyList');
+    list.replaceChildren();
+    const history = Array.isArray(response.history) ? response.history.slice(0, 8) : [];
+    if (!history.length) {
+      const empty = document.createElement('p');
+      empty.className = 'empty-state';
+      empty.textContent = '还没有完成的任务。';
+      list.append(empty);
+      return;
+    }
+
+    for (const entry of history) {
+      const card = document.createElement('article');
+      card.className = 'history-item';
+      const title = document.createElement('div');
+      title.className = 'history-title';
+      const heading = document.createElement('strong');
+      heading.textContent = `${historyType(entry)} · ${entry.mode === 'api' ? '接口观察' : '页面详情'}`;
+      const status = document.createElement('span');
+      status.className = 'summary-state';
+      status.textContent = entry.status === 'completed' ? '完成' : entry.status === 'stopped' ? '停止' : '失败';
+      title.append(heading, status);
+      const meta = document.createElement('p');
+      meta.className = 'history-meta';
+      meta.textContent = `${formatDate(entry.completedAt)} · 成功 ${entry.collected || 0} 条 · 失败 ${(entry.failures || []).length} 条`;
+      const actions = document.createElement('div');
+      actions.className = 'history-actions';
+      const exportButton = document.createElement('button');
+      exportButton.type = 'button';
+      exportButton.textContent = '重新导出';
+      exportButton.addEventListener('click', () => exportHistory(entry.id, exportButton));
+      const deleteButton = document.createElement('button');
+      deleteButton.type = 'button';
+      deleteButton.className = 'delete';
+      deleteButton.textContent = '删除';
+      deleteButton.addEventListener('click', () => deleteHistory(entry.id));
+      actions.append(exportButton, deleteButton);
+      card.append(title, meta, actions);
+      list.append(card);
+    }
+  }
+
+  async function exportHistory(id, button) {
+    button.disabled = true;
+    button.textContent = '生成中…';
+    try {
+      const response = await sendRuntime({ type: 'EXPORT_HISTORY', id });
+      if (!response?.ok) throw new Error(response?.error || '历史导出失败');
+      setStatus(`历史任务已重新导出：${response.result?.filename || 'Excel 文件'}。`, 'success');
+    } catch (error) {
+      setStatus(error.message || '历史导出失败。', 'error');
+    } finally {
+      button.disabled = false;
+      button.textContent = '重新导出';
+    }
+  }
+
+  async function deleteHistory(id) {
+    if (!confirm('确定删除这条历史任务吗？')) return;
+    const response = await sendRuntime({ type: 'DELETE_HISTORY', id });
+    if (!response?.ok) throw new Error(response?.error || '删除历史失败');
+    await refreshHistory();
+    setStatus('历史任务已删除。', 'success');
+  }
+
+  function renderSettings() {
+    $('downloadAuto').checked = settings.downloadMode === 'auto';
+    $('downloadManual').checked = settings.downloadMode !== 'auto';
+    $('downloadFolder').value = settings.downloadFolder || '';
+    $('fileNameTemplate').value = settings.fileNameTemplate || '';
+    $('imageLimit').value = String(settings.imageLimit ?? 0);
+    $('maxEmbedImages').value = String(settings.maxEmbedImages ?? 1000);
+    $('collectSellerInfo').checked = settings.collectSellerInfo !== false;
+    $('saveAs').checked = Boolean(settings.saveAs);
+    $('notifyOnComplete').checked = settings.notifyOnComplete !== false;
+    setMode(settings.mode || 'rpa', false);
+  }
+
+  async function loadSettings() {
+    const response = await sendRuntime({ type: 'GET_SETTINGS' });
+    if (!response?.ok) throw new Error(response?.error || '读取设置失败');
+    settings = { ...DEFAULT_SETTINGS, ...(response.settings || {}) };
+    renderSettings();
+  }
+
+  async function saveSettings() {
+    const next = {
+      ...settings,
+      mode: selectedMode,
+      downloadMode: $('downloadAuto').checked ? 'auto' : 'manual',
+      downloadFolder: $('downloadFolder').value,
+      fileNameTemplate: $('fileNameTemplate').value,
+      imageLimit: Number($('imageLimit').value || 0),
+      maxEmbedImages: Number($('maxEmbedImages').value || 1000),
+      collectSellerInfo: $('collectSellerInfo').checked,
+      saveAs: $('saveAs').checked,
+      notifyOnComplete: $('notifyOnComplete').checked
+    };
+    const response = await sendRuntime({ type: 'SAVE_SETTINGS', settings: next });
+    if (!response?.ok) throw new Error(response?.error || '保存设置失败');
+    settings = { ...settings, ...(response.settings || next) };
+    renderSettings();
+    setStatus('下载设置已保存；下一个任务会使用新设置。', 'success');
+  }
+
+  function bindEvents() {
+    $('settingsJump').addEventListener('click', () => showScreen('settings'));
+    $('pageContextJump').addEventListener('click', () => showScreen(currentPageType === 'account' ? 'store' : 'detail'));
+    $('backButton').addEventListener('click', () => goBack());
+    document.querySelectorAll('[data-open-screen]').forEach(button => {
+      button.addEventListener('click', () => showScreen(button.dataset.openScreen));
+    });
+    document.querySelector('[data-action="diagnostic"]')?.addEventListener('click', () => {
+      showScreen('detail');
+      void exportDiagnosticPackage();
+    });
+    $('modeRpa').addEventListener('click', () => setMode('rpa'));
+    $('modeApi').addEventListener('click', () => setMode('api'));
+    $('collectButton').addEventListener('click', () => collectCurrentPage());
+    $('storeCollectButton').addEventListener('click', () => collectCurrentStorePage());
+    $('storeExportButton').addEventListener('click', () => exportItems($('storeExportButton')).catch(error => setStatus(error.message, 'error')));
+    $('storeDataButton').addEventListener('click', () => showScreen('data'));
+    $('diagnosticButton').addEventListener('click', () => exportDiagnosticPackage());
+    $('batchLinkButton').addEventListener('click', () => startLinkBatch());
+    $('searchCrawlButton').addEventListener('click', () => startSearchCrawl());
+    $('stopJobButton').addEventListener('click', () => stopJob());
+    $('exportButton').addEventListener('click', () => exportItems($('exportButton')).catch(error => setStatus(error.message, 'error')));
+    $('taskExportButton').addEventListener('click', () => exportItems($('taskExportButton')).catch(error => setStatus(error.message, 'error')));
+    $('taskDataButton').addEventListener('click', () => showScreen('data'));
+    $('clearButton').addEventListener('click', () => clearItems().catch(error => setStatus(error.message, 'error')));
+    $('saveSettingsButton').addEventListener('click', () => saveSettings().catch(error => setStatus(error.message, 'error')));
+    $('linkInput').addEventListener('input', () => {
+      const links = parseProductLinks($('linkInput').value);
+      $('linkCount').textContent = `${links.length} 个链接`;
+    });
+    $('openDownloadSettings').addEventListener('click', () => {
+      void chrome.tabs.create({ url: 'chrome://settings/downloads' }).catch(error => {
+        setStatus(error.message || '无法打开 Chrome 下载设置。', 'error');
+      });
+    });
+
+    chrome.tabs.onActivated.addListener(() => void refreshCurrentPage().catch(() => {}));
+    chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+      if (activeTab?.id === tabId && (changeInfo.status === 'complete' || changeInfo.url)) {
+        void refreshCurrentPage().catch(() => {});
+      }
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', async () => {
+    bindEvents();
+    updateScreenChrome('home');
+    try {
+      await loadSettings();
+      await Promise.all([refreshCurrentPage(), refreshCount(), refreshHistory(), refreshJob()]);
+    } catch (error) {
+      setStatus(error.message || '插件初始化失败，请刷新侧边栏重试。', 'error');
+    }
+
+    const pollTimer = setInterval(() => {
+      void refreshJob().catch(() => {});
+      void refreshCount().catch(() => {});
+    }, 1000);
+    window.addEventListener('unload', () => clearInterval(pollTimer), { once: true });
+  });
+})();

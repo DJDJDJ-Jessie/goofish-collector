@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>闲鱼研究助手</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="appbar">
+        <div class="appbar-brand">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <div>
+            <p class="appbar-title">闲鱼研究助手</p>
+            <p class="appbar-subtitle">公开商品数据采集工作台</p>
+          </div>
+        </div>
+        <div class="appbar-actions">
+          <button id="pageContextJump" class="header-icon" type="button" aria-label="查看当前页面" title="查看当前页面">◎</button>
+          <button id="settingsJump" class="header-icon" type="button" aria-label="打开设置" title="设置">⚙</button>
+        </div>
+      </header>
+
+      <div class="signal-line" aria-hidden="true"><span></span></div>
+
+      <header class="screenbar">
+        <button id="backButton" class="back-button is-hidden" type="button" aria-label="返回">←</button>
+        <div class="screen-heading">
+          <p id="screenKicker" class="screen-kicker">WORKSPACE</p>
+          <h1 id="screenTitle">闲鱼研究助手</h1>
+          <p id="screenSubtitle">从公开详情页整理同行商品与店铺信息</p>
+        </div>
+      </header>
+
+      <section id="modePanel" class="mode-panel is-hidden" aria-label="采集模式">
+        <div class="mode-copy">
+          <span class="field-label">采集模式</span>
+          <strong id="modeTitle">页面详情模式</strong>
+          <p id="modeHint" class="mode-hint">读取详情页已经展示的商品文案、图片和店铺信息。</p>
+        </div>
+        <div class="segmented" role="group" aria-label="选择采集模式">
+          <button id="modeRpa" class="segment is-selected" type="button" data-mode="rpa" aria-pressed="true">页面详情</button>
+          <button id="modeApi" class="segment" type="button" data-mode="api" aria-pressed="false">API 模式</button>
+        </div>
+      </section>
+
+      <div id="screenHost">
+        <section id="screen-home" class="screen is-active" data-screen="home" aria-labelledby="screenTitle">
+          <section class="context-card home-context-card" aria-live="polite">
+            <div class="context-topline">
+              <span id="homeSiteState" class="status-dot"><span></span>检查当前页</span>
+              <span id="homePageKind" class="page-chip">—</span>
+            </div>
+            <strong id="homePageName" class="home-page-name">正在读取当前标签页…</strong>
+            <p id="homePageHint" class="context-url">打开闲鱼后，可直接从这里开始采集。</p>
+          </section>
+
+          <div class="menu-stack">
+            <section class="menu-card">
+              <h2>批量采集</h2>
+              <button class="menu-row" type="button" data-open-screen="detail">
+                <span class="row-icon blue">◉</span>
+                <span class="row-copy"><strong>采集当前详情</strong><small>读取此刻打开的商品详情页</small></span>
+                <span class="row-chevron">›</span>
+              </button>
+              <button class="menu-row" type="button" data-open-screen="store">
+                <span class="row-icon orange">◎</span>
+                <span class="row-copy"><strong>采集当前店铺页</strong><small>读取店铺资料、全部已加载评价和评价图片</small></span>
+                <span class="row-chevron">›</span>
+              </button>
+              <button class="menu-row" type="button" data-open-screen="links">
+                <span class="row-icon violet">↗</span>
+                <span class="row-copy"><strong>批量商品链接</strong><small>粘贴链接，自动逐个打开详情页</small></span>
+                <span class="row-chevron">›</span>
+              </button>
+              <button class="menu-row" type="button" data-open-screen="search">
+                <span class="row-icon teal">⌁</span>
+                <span class="row-copy"><strong>搜索跨页采集</strong><small>按页码推进，逐个访问商品详情</small></span>
+                <span class="row-chevron">›</span>
+              </button>
+            </section>
+
+            <section class="menu-card">
+              <h2>数据中心</h2>
+              <button class="menu-row" type="button" data-open-screen="data">
+                <span class="row-icon ink">▦</span>
+                <span class="row-copy"><strong>已采集数据</strong><small><span id="homeItemCount">0</span> 条商品记录，支持导出 Excel</small></span>
+                <span class="row-chevron">›</span>
+              </button>
+              <button class="menu-row" type="button" data-open-screen="history">
+                <span class="row-icon slate">◷</span>
+                <span class="row-copy"><strong>采集历史</strong><small>查看任务结果，重新导出或删除</small></span>
+                <span class="row-chevron">›</span>
+              </button>
+              <button class="menu-row" type="button" data-open-screen="task">
+                <span class="row-icon teal">◌</span>
+                <span class="row-copy"><strong>任务状态</strong><small id="homeTaskHint">查看当前任务进度和完成结果</small></span>
+                <span class="row-chevron">›</span>
+              </button>
+              <button class="menu-row" type="button" data-open-screen="settings">
+                <span class="row-icon sand">⚙</span>
+                <span class="row-copy"><strong>下载与字段设置</strong><small>自动下载、图片、卖家资料和文件名</small></span>
+                <span class="row-chevron">›</span>
+              </button>
+            </section>
+
+            <section class="menu-card compact-card">
+              <h2>工具与边界</h2>
+              <button class="menu-row" type="button" data-action="diagnostic">
+                <span class="row-icon orange">▣</span>
+                <span class="row-copy"><strong>导出页面诊断包</strong><small>页面识别异常时，用于分析当前页面结构</small></span>
+                <span class="row-chevron">›</span>
+              </button>
+            </section>
+          </div>
+
+          <div class="boundary-note">
+            <span class="note-mark">i</span>
+            <p>只处理闲鱼页面公开可见或已经加载的数据；不读取聊天、Cookie，不生成签名，也不绕过验证码或访问限制。</p>
+          </div>
+
+          <section class="welcome-card home-welcome-card">
+            <div class="welcome-copy">
+              <span class="welcome-label">RESEARCH DESK · 01</span>
+              <h2>把公开商品信息<br />整理成可比较的数据</h2>
+              <p>从商品详情页开始，逐条保存文案、图片、价格和卖家公开资料。</p>
+            </div>
+            <span class="welcome-orbit" aria-hidden="true"><i></i><i></i><i></i></span>
+          </section>
+        </section>
+
+        <section id="screen-detail" class="screen" data-screen="detail" aria-labelledby="screenTitle">
+          <section class="page-intro">
+            <span class="intro-label">CURRENT DETAIL</span>
+            <h2>采集当前商品详情</h2>
+            <p>商品主表会以详情页为准；开启卖家资料后，会继续读取店铺简介与公开评价。</p>
+          </section>
+
+          <section class="context-card detail-context-card" aria-live="polite">
+            <div class="context-topline">
+              <span id="siteBadge" class="status-dot"><span></span>检查当前页</span>
+              <span id="pageType" class="page-chip">—</span>
+            </div>
+            <h2 id="pageTitle">正在读取当前标签页…</h2>
+            <p id="pageUrl" class="context-url">—</p>
+            <div class="context-state"><span>当前状态</span><strong id="currentState">待检查</strong></div>
+          </section>
+
+          <section class="action-card">
+            <button id="collectButton" class="button primary large" type="button">采集当前详情页</button>
+            <button id="diagnosticButton" class="button tertiary" type="button">一键导出页面诊断包</button>
+          </section>
+
+          <p class="helper note-helper">采集结果只保存公开商品信息。真实图片会在导出 Excel 时下载并嵌入，同时生成图片索引表。</p>
+        </section>
+
+        <section id="screen-store" class="screen" data-screen="store" aria-labelledby="screenTitle">
+          <section class="page-intro">
+            <span class="intro-label">CURRENT STORE</span>
+            <h2>采集当前店铺页</h2>
+            <p>读取店铺公开资料，自动进入评价区域并尽量加载全部公开评价；评价图片会在导出时下载并嵌入。</p>
+          </section>
+
+          <section class="context-card detail-context-card" aria-live="polite">
+            <div class="context-topline">
+              <span id="storeSiteBadge" class="status-dot"><span></span>检查当前页</span>
+              <span id="storePageType" class="page-chip">—</span>
+            </div>
+            <h2 id="storePageTitle">正在读取当前标签页…</h2>
+            <p id="storePageUrl" class="context-url">—</p>
+            <div class="context-state"><span>当前状态</span><strong id="storeCurrentState">待检查</strong></div>
+          </section>
+
+          <section class="action-card">
+            <button id="storeCollectButton" class="button primary large" type="button">采集当前店铺页</button>
+            <button id="storeExportButton" class="button teal-action large" type="button" disabled>立即下载 Excel</button>
+            <button id="storeDataButton" class="button outline-action" type="button">查看数据中心</button>
+            <p id="storeCollectHint" class="helper">采集会在当前标签页内滚动评价区域；期间请不要切换到其它页面。</p>
+          </section>
+        </section>
+
+        <section id="screen-links" class="screen" data-screen="links" aria-labelledby="screenTitle">
+          <section class="page-intro">
+            <span class="intro-label">BATCH INPUT</span>
+            <h2>批量导出商品详情</h2>
+            <p>每行一个详情链接。任务会自动逐个打开链接，采集完成后再按设置下载。</p>
+          </section>
+
+          <section class="form-card">
+            <label class="form-label" for="linkInput">商品详情链接 <span class="optional-label">支持批量粘贴</span></label>
+            <textarea id="linkInput" class="link-input" rows="8" placeholder="一行一个商品详情链接
+https://www.goofish.com/item?id=…"></textarea>
+            <div class="input-footer"><span>只接受闲鱼商品详情链接</span><strong id="linkCount">0 个链接</strong></div>
+          </section>
+          <button id="batchLinkButton" class="button primary large" type="button">开始批量采集</button>
+          <p class="helper">API 模式会观察当前详情页已经公开加载的接口数据；页面详情模式会读取页面实际展示内容。</p>
+        </section>
+
+        <section id="screen-search" class="screen" data-screen="search" aria-labelledby="screenTitle">
+          <section class="page-intro">
+            <span class="intro-label">SEARCH CRAWL</span>
+            <h2>搜索跨页采集详情</h2>
+            <p>从当前搜索结果页收集商品链接，按当前页码推进并逐个打开详情页，不停留在搜索列表数据。</p>
+          </section>
+
+          <section class="form-card">
+            <div class="field-grid large-grid">
+              <label class="form-label">目标商品数<input id="targetCount" type="number" min="1" max="2000" value="100" /></label>
+              <label class="form-label">最多采集页数<input id="maxPages" type="number" min="1" max="100" value="10" /></label>
+            </div>
+            <div class="search-rule"><span class="rule-icon">⌁</span><p>例如目标 100 条、每页约 40 条时，会自动处理约 3 页。插件会识别当前页码并点击下一页码；没有文字“下一页”按钮也可以运行。</p></div>
+          </section>
+          <button id="searchCrawlButton" class="button primary large" type="button">启动自动跨页采集</button>
+          <p class="helper">请先把当前标签页停留在闲鱼搜索结果页，并确保搜索结果已经加载。</p>
+        </section>
+
+        <section id="screen-data" class="screen" data-screen="data" aria-labelledby="screenTitle">
+          <section class="data-hero">
+            <span class="intro-label">LOCAL DATASET</span>
+            <div class="data-hero-line"><strong id="dataNumber">0</strong><span>条商品记录</span></div>
+            <p>数据保存在本机浏览器中，导出时会把图片下载并嵌入 Excel。</p>
+          </section>
+          <section class="data-summary-card">
+            <div><span>当前商品主表</span><strong id="itemCount">0</strong></div>
+            <div><span>店铺资料</span><strong id="storeCount">0</strong></div>
+            <div><span>图片处理</span><strong class="accent-text">真实图片</strong></div>
+            <div><span>附加表</span><strong>图片、店铺、评价</strong></div>
+          </section>
+          <section class="action-card data-actions-card">
+            <button id="exportButton" class="button primary large" type="button">下载 Excel</button>
+            <button id="clearButton" class="button danger-outline" type="button">清空当前数据</button>
+            <p id="exportHint" class="helper">商品主表、图片索引、店铺资料、店铺评价和评价图片会一起写入工作簿；下载文件夹由设置决定。</p>
+          </section>
+        </section>
+
+        <section id="screen-history" class="screen" data-screen="history" aria-labelledby="screenTitle">
+          <section class="page-intro">
+            <span class="intro-label">TASK ARCHIVE</span>
+            <h2>采集历史</h2>
+            <p>保留最近任务的处理结果，可重新导出；删除历史不会影响当前数据。</p>
+          </section>
+          <div id="historyList" class="history-list"><p class="empty-state">还没有完成的任务。</p></div>
+        </section>
+
+        <section id="screen-settings" class="screen" data-screen="settings" aria-labelledby="screenTitle">
+          <section class="page-intro">
+            <span class="intro-label">WORKSPACE SETTINGS</span>
+            <h2>下载与字段设置</h2>
+            <p>设置会保存在当前浏览器中，下一个采集或导出任务开始时生效。</p>
+          </section>
+
+          <section class="settings-card">
+            <div class="settings-section">
+              <h3>任务完成后</h3>
+              <label class="choice-line"><input id="downloadAuto" name="downloadMode" type="radio" value="auto" /><span><strong>自动下载</strong><small>完成后立即下载 Excel，并显示完成提示</small></span></label>
+              <label class="choice-line"><input id="downloadManual" name="downloadMode" type="radio" value="manual" /><span><strong>手动下载</strong><small>完成后停留在任务页，由我点击下载</small></span></label>
+            </div>
+
+            <div class="settings-section">
+              <h3>文件与图片</h3>
+              <label class="form-label">下载子文件夹<input id="downloadFolder" type="text" placeholder="闲鱼研究采集" /></label>
+              <p class="field-note">位置相对于浏览器默认下载目录；绝对路径由 Chrome 的下载设置控制。</p>
+              <label class="form-label">文件名模板<input id="fileNameTemplate" type="text" placeholder="闲鱼商品研究-{date}-{count}" /></label>
+              <p class="field-note">可用变量：{date}、{time}、{count}、{type}、{mode}</p>
+              <div class="field-grid large-grid settings-grid">
+                <label class="form-label">每个商品图片<select id="imageLimit"><option value="0">全部</option><option value="3">最多 3 张</option><option value="5">最多 5 张</option><option value="10">最多 10 张</option></select></label>
+                <label class="form-label">商品图片上限<select id="maxEmbedImages"><option value="300">300 张</option><option value="500">500 张</option><option value="1000">1000 张</option></select></label>
+              </div>
+              <p class="field-note">此上限只限制商品图片；已读取的店铺评价图片会单独全部处理。</p>
+            </div>
+
+            <div class="settings-section">
+              <h3>采集内容</h3>
+              <label class="choice-line compact-choice"><input id="collectSellerInfo" type="checkbox" /><span><strong>补充卖家公开资料</strong><small>打开卖家账号页，读取简介、公开评价、粉丝等可见信息</small></span></label>
+              <label class="choice-line compact-choice"><input id="saveAs" type="checkbox" /><span><strong>下载时显示“另存为”</strong><small>每次下载前由 Chrome 询问保存位置</small></span></label>
+              <label class="choice-line compact-choice"><input id="notifyOnComplete" type="checkbox" /><span><strong>任务完成时显示系统通知</strong><small>即使侧边栏暂时收起，也能收到完成提示</small></span></label>
+            </div>
+          </section>
+
+          <button id="openDownloadSettings" class="text-button" type="button">打开 Chrome 下载目录设置 ↗</button>
+          <button id="saveSettingsButton" class="button primary large" type="button">保存设置</button>
+        </section>
+
+        <section id="screen-task" class="screen" data-screen="task" aria-labelledby="screenTitle">
+          <section id="taskRail" class="task-workspace" data-active="false" aria-live="polite">
+            <div class="task-state-block">
+              <span id="jobBadge" class="task-label">当前任务</span>
+              <h2 id="jobHeadline">没有活动任务</h2>
+              <div class="progress-ring" id="progressRing" aria-label="任务进度">
+                <div class="progress-ring-inner"><strong id="jobProgressText">0%</strong><span>进度</span></div>
+              </div>
+              <p id="taskCountText" class="task-count">准备开始</p>
+              <p id="jobStatus" class="task-status">任务状态会显示在这里。</p>
+            </div>
+
+            <section class="task-info-card">
+              <div class="task-info-heading"><strong>任务概览</strong><span class="task-pulse"></span></div>
+              <dl class="task-info-grid">
+                <div><dt>采集模式</dt><dd id="taskModeText">—</dd></div>
+                <div><dt>数据类型</dt><dd id="taskTypeText">—</dd></div>
+                <div><dt>创建时间</dt><dd id="taskCreatedText">—</dd></div>
+                <div><dt>当前状态</dt><dd id="taskStateText">—</dd></div>
+              </dl>
+            </section>
+
+            <div class="task-filter"><span class="filter-icon">⌕</span><span id="taskFilterText">当前未进行任何筛选</span><span class="filter-chip">全部数据</span></div>
+
+            <div class="task-actions">
+              <button id="stopJobButton" class="button outline-action" type="button" disabled>停止任务</button>
+              <button id="taskExportButton" class="button primary large" type="button">导出 Excel 数据</button>
+              <button id="taskDataButton" class="button teal-action" type="button">打开数据中心</button>
+            </div>
+          </section>
+        </section>
+      </div>
+
+      <p id="status" class="status" role="status" aria-live="polite">准备就绪</p>
+    </main>
+    <script src="diagnostic.js"></script>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

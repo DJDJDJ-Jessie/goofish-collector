@@ -1,0 +1,56 @@
+{
+  "manifest_version": 3,
+  "name": "闲鱼公开商品研究采集器",
+  "version": "0.5.1",
+  "description": "自动进入闲鱼商品详情页，采集公开商品研究资料并导出包含真实图片的 Excel。",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "downloads",
+    "activeTab",
+    "scripting",
+    "tabs",
+    "alarms",
+    "sidePanel",
+    "notifications",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "https://goofish.com/*",
+    "https://*.goofish.com/*",
+    "https://*.alicdn.com/*",
+    "https://*.tbcdn.cn/*",
+    "https://*.taobao.com/*",
+    "https://*.aliyuncs.com/*",
+    "https://*.alipayobjects.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "打开闲鱼研究采集器"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://goofish.com/*",
+        "https://*.goofish.com/*"
+      ],
+      "js": ["main-world.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://goofish.com/*",
+        "https://*.goofish.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    }
+  ]
+}
