@@ -1732,7 +1732,15 @@
   }
 
   function finalDetailItems(items) {
-    const list = Array.isArray(items) ? items.filter(Boolean) : [];
+    const list = (Array.isArray(items) ? items.filter(Boolean) : [])
+      .filter(item => {
+        const text = `${item?.title || ''}\n${item?.description || ''}`;
+        const hasProductSignal = Boolean(
+          item?.sellerUrl || item?.sellerName || item?.price || (Array.isArray(item?.images) && item.images.length)
+        );
+        // 详情路由偶尔会落到平台协议/隐私页面；URL 仍带 itemId，不能仅凭路由判为商品成功。
+        return hasProductSignal || !/闲鱼社区服务协议|用户协议|隐私政策|平台规则|服务条款/i.test(text);
+      });
     if (!isDetailPage()) return [];
     const matched = list.filter(sameDetailIdentity);
     // 有些详情路由没有把商品 ID 放进 URL；这种情况下只接受当前详情页自己构造的

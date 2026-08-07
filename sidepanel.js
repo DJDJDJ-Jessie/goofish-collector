@@ -530,7 +530,12 @@
           if (!item?.sellerUrl) continue;
           setStatus('商品详情已读取，正在进入卖家店铺页补充基础公开资料…');
           try {
-            const enrichment = await sendRuntime({ type: 'ENRICH_SINGLE_ITEM', item });
+            const enrichment = await sendRuntime({
+              type: 'ENRICH_SINGLE_ITEM',
+              item,
+              tabId: activeTab.id,
+              returnUrl: pendingCurrentSourceUrl || activeTab.url || ''
+            });
             if (enrichment?.item) {
               pendingCurrentItems = pendingCurrentItems.map(candidate => (
                 (candidate.itemId && candidate.itemId === enrichment.item.itemId)

@@ -208,6 +208,7 @@ async function writeItems(items) {
 
 function reviewIdentity(review) {
   return [
+    Number(review?.reviewIndex) > 0 ? Number(review.reviewIndex) : '',
     cleanText(review?.reviewer, 160),
     cleanText(review?.feedback, 1000),
     cleanText(review?.timeIp, 160),
@@ -988,8 +989,38 @@ async function fetchSellerProfile(sellerUrl) {
   }
 }
 
+async function fetchSellerProfileInTab(tabId, sellerUrl, returnUrl) {
+  const url = validSellerUrl(sellerUrl);
+  const originalUrl = validItemUrl(returnUrl) || cleanUrl(returnUrl || '');
+  if (!url || !Number.isInteger(Number(tabId))) {
+    throw new Error('当前商品页没有可复用的标签页。');
+  }
+
+  try {
+    await tabsUpdate(Number(tabId), { url });
+    await waitForTabComplete(Number(tabId));
+    const info = await ensureContentReceiver(Number(tabId));
+    if (info?.pageType !== 'account') throw new Error('卖家账号页未正确加载。');
+    return await readStableAccountProfile(Number(tabId));
+  } finally {
+    // 当前详情页补采集复用原标签页；资料读取后恢复商品详情，避免留下额外标签页。
+    if (originalUrl) {
+      try {
+        await tabsUpdate(Number(tabId), { url: originalUrl });
+        await waitForTabComplete(Number(tabId));
+        await ensureContentReceiver(Number(tabId));
+      } catch (_) {
+        // 店铺资料已经读到时，不让返回原详情页失败覆盖有效补采集结果。
+      }
+    }
+  }
+}
+
 function collectedItemForLink(result, link) {
-  const items = Array.isArray(result?.items) ? result.items : [];
+  const items = [
+    ...(Array.isArray(result?.items) ? result.items : []),
+    ...(Array.isArray(result?.stagedItems) ? result.stagedItems : [])
+  ];
   const itemId = cleanText(link?.itemId, 200);
   const exact = items.find(item => itemId && cleanText(item?.itemId, 200) === itemId)
     || items.find(item => cleanUrl(item?.itemUrl || '') === cleanUrl(link?.itemUrl || ''));
@@ -1149,7 +1180,15 @@ async function advanceLinkJob(job, failureMessage = '') {
 
 async function processLinkJob(job) {
   try {
-    const result = assertDetailCollection(await sendCollectionByMode(job.tabId, job.mode));
+    const pageInfo = await ensureContentReceiver(job.tabId);
+    if (pageInfo?.pageType !== 'detail') {
+      throw new Error('自动打开后当前标签页不是商品详情页，未写入非详情页面数据。');
+    }
+    const expectedUrl = job.links?.[job.index] || '';
+    if (expectedUrl && !itemUrlsMatch(pageInfo.url, expectedUrl)) {
+      throw new Error('当前详情页链接与待采集商品不一致，已等待页面重新导航。');
+    }
+    const result = assertDetailCollection(await sendCollectionByMode(job.tabId, job.mode), expectedUrl);
     const count = Number(result?.count ?? result?.added ?? 0);
     const next = {
       ...job,
@@ -1199,18 +1238,34 @@ function compactSearchLink(input) {
   };
 }
 
-function assertDetailCollection(result) {
+function isInvalidDetailRecord(item) {
+  const text = `${item?.title || ''}\n${item?.description || ''}`;
+  const hasProductSignal = Boolean(
+    item?.sellerUrl || item?.sellerName || item?.price || (Array.isArray(item?.images) && item.images.length)
+  );
+  return !hasProductSignal && /闲鱼社区服务协议|用户协议|隐私政策|平台规则|服务条款/i.test(text);
+}
+
+function assertDetailCollection(result, expectedUrl = '') {
   if (!result || result.ok === false) {
     throw new Error(result?.error || '详情页没有返回采集结果');
   }
   if (result.pageType !== 'detail') {
     throw new Error('当前打开的页面不是商品详情页，已跳过，避免把搜索卡片写入结果');
   }
-  const count = Number(result.count ?? result.added ?? result.items?.length ?? 0);
-  if (!count) {
-    throw new Error('当前详情页还没有识别到有效商品资料，已等待页面完成渲染后重试');
+  const items = (Array.isArray(result.items) ? result.items : [])
+    .filter(item => !isInvalidDetailRecord(item));
+  const count = Number(result.count ?? result.added ?? items.length ?? 0);
+  if (!count || !items.length) {
+    throw new Error('当前页面没有识别到有效商品详情，可能仍在加载或打开了平台协议页，已等待页面完成渲染后重试。');
   }
-  return result;
+  const expectedId = itemIdFromUrl(expectedUrl);
+  if (expectedId && !items.some(item => (
+    cleanText(item?.itemId, 200) === expectedId || itemIdFromUrl(item?.itemUrl) === expectedId
+  ))) {
+    throw new Error('当前详情页与待采集商品不一致，未写入当前页面数据。');
+  }
+  return { ...result, items, count: items.length };
 }
 
 function normalizeSearchJob(job) {
@@ -1450,7 +1505,10 @@ async function processSearchDetail(job) {
     if (job.expectedDetailUrl && !itemUrlsMatch(pageInfo.url, job.expectedDetailUrl)) {
       throw new Error('当前详情页链接与待采集商品不一致，已等待页面重新导航。');
     }
-    const result = assertDetailCollection(await sendCollectionByMode(job.tabId, job.mode));
+    const result = assertDetailCollection(
+      await sendCollectionByMode(job.tabId, job.mode),
+      currentLink.itemUrl
+    );
     const count = Number(result.count ?? result.added ?? 0);
     const next = {
       ...job,
@@ -1850,8 +1908,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!item || !sellerUrl) {
           return { ok: true, enriched: false, reason: '当前详情页没有公开的卖家账号页链接。' };
         }
-        const profile = await fetchSellerProfile(sellerUrl);
-        const storedProfile = await persistStoreProfile(profile, sellerUrl);
+        const requestedTabId = Number(message.tabId);
+        const profile = Number.isInteger(requestedTabId)
+          ? await fetchSellerProfileInTab(requestedTabId, sellerUrl, message.returnUrl || item.itemUrl)
+          : await fetchSellerProfile(sellerUrl);
+        // 商品任务只补基础店铺字段；完整评价和评价图片必须由“采集当前店铺页”加载，
+        // 防止把账号页首屏的少量评价误报为完整店铺评价。
+        const profileForProduct = { ...profile, reviews: [] };
+        const storedProfile = await persistStoreProfile(profileForProduct, sellerUrl);
         const enrichedItem = applyProfileToItem(item, storedProfile || profile);
         return { ok: true, enriched: Boolean(enrichedItem), item: enrichedItem, profile: storedProfile || profile };
       }
