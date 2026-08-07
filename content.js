@@ -162,13 +162,46 @@
     if (!item || !(item.itemId || item.itemUrl || item.title || item.images?.length)) return null;
     const key = itemKey(item);
     const old = pageItems.get(key) || {};
-    const merged = { ...old, ...item };
+    const merged = mergeItemValues(old, item);
 
     for (const field of ['images', 'reviewSamples']) {
       merged[field] = unique([...(old[field] || []), ...(item[field] || [])]);
     }
 
     pageItems.set(key, merged);
+    return merged;
+  }
+
+  function isInternalCategory(value) {
+    return /^类目ID\s*\d+$/i.test(oneLine(value || '', 200));
+  }
+
+  function preferCategoryValue(oldValue, newValue) {
+    const oldCategory = oneLine(oldValue || '', 500);
+    const newCategory = oneLine(newValue || '', 500);
+    if (!oldCategory) return newCategory;
+    if (!newCategory) return oldCategory;
+    if (isInternalCategory(oldCategory) && !isInternalCategory(newCategory)) return newCategory;
+    if (!isInternalCategory(oldCategory) && isInternalCategory(newCategory)) return oldCategory;
+    return newCategory;
+  }
+
+  function mergeItemValues(old, item) {
+    const merged = { ...old };
+    for (const [field, value] of Object.entries(item || {})) {
+      if (field === 'images' || field === 'reviewSamples') continue;
+      if (field === 'category') {
+        if (value) {
+          merged.category = preferCategoryValue(old.category, value);
+        } else if (isInternalCategory(old.category) && /(?:^|,)dom(?:,|$)/i.test(item.dataSource || '')) {
+          // DOM 已经确认当前详情没有可见类目名称时，不保留接口里的内部 categoryId。
+          merged.category = '';
+        }
+        continue;
+      }
+      // 不让一次异步接口/DOM扫描的空值覆盖已经读到的有效值。
+      if (value !== undefined && value !== null && String(value) !== '') merged[field] = value;
+    }
     return merged;
   }
 
@@ -331,14 +364,68 @@
     if (values.length > 1) return values.join(' / ');
     if (values[0]) return values[0];
 
-    // 当前详情页通常只把类目 ID 放在 URL 中，页面正文不展示名称。
-    // 保留这个可核对的公开标识，避免导出时静默变成空值或误写成其它文本。
-    try {
-      const categoryId = new URL(location.href).searchParams.get('categoryId');
-      return categoryId ? `类目ID ${categoryId}` : '';
-    } catch (_) {
-      return '';
+    // URL 中的 categoryId 只是平台内部标识，不是用户看到的类目名称。
+    // 如果详情页没有公开展示类目或服务类型，宁可留空，也不把内部 ID 冒充成类目。
+    return '';
+  }
+
+  function compactLabel(value) {
+    return oneLine(value || '', 200).replace(/[\s:：|｜·•\-]+/g, '').trim();
+  }
+
+  function detailAttributeRows(root) {
+    if (!root?.querySelectorAll) return [];
+    const selectors = [
+      '[class^="labels--"] [class^="item--"]',
+      '[class*=" labels--"] [class*=" item--"]',
+      '[class*="label-list"] [class*="item"]',
+      '[class*="item-main-info"] [class^="item--"]',
+      '[class*="item-main-info"] [class*=" item--"]',
+      '[data-testid*="property"] [role="listitem"]',
+      '[data-testid*="attribute"] [role="listitem"]'
+    ];
+    const rows = [];
+    const seen = new Set();
+    for (const selector of selectors) {
+      for (const node of root.querySelectorAll(selector)) {
+        if (seen.has(node)) continue;
+        seen.add(node);
+        rows.push(node);
+      }
     }
+    return rows;
+  }
+
+  function detailAttributeValue(root, labels) {
+    const wanted = labels.map(compactLabel).filter(Boolean);
+    if (!wanted.length) return '';
+    const labelSelector = [
+      '[class^="label--"]', '[class*=" label--"]',
+      '[data-testid*="label"]', '[aria-label]'
+    ].join(', ');
+    const valueSelector = [
+      '[class^="value--"]', '[class*=" value--"]',
+      '[data-testid*="value"]'
+    ].join(', ');
+
+    for (const row of detailAttributeRows(root)) {
+      const labelNode = row.querySelector(labelSelector);
+      const label = compactLabel(labelNode?.textContent || '');
+      const matched = wanted.find(candidate => label === candidate || label.startsWith(candidate));
+      if (!matched) continue;
+
+      const valueNode = row.querySelector(valueSelector);
+      const value = oneLine(valueNode?.textContent || '', 500);
+      if (value) return value;
+
+      const compactRow = compactLabel(row.textContent || '');
+      const start = compactRow.indexOf(matched);
+      if (start >= 0) {
+        const remainder = compactRow.slice(start + matched.length);
+        if (remainder) return remainder;
+      }
+    }
+    return '';
   }
 
   function serviceTypeFromRoot(root) {
@@ -348,7 +435,8 @@
     const detailScope = root?.querySelector?.(
       '[class^="item-main-info"], [class*="item-main-info"], [class^="item-info"], [class*=" item-info"]'
     ) || root;
-    const scopedValue = extractLabelValue(detailScope, ['服务类型']);
+    const rowValue = detailAttributeValue(detailScope, ['服务类型']);
+    const scopedValue = rowValue || extractLabelValue(detailScope, ['服务类型']);
     const fallbackValue = scopedValue || (detailScope === root ? '' : extractLabelValue(root, ['服务类型']));
     const value = oneLine(fallbackValue, 300);
     if (!value) return '';
@@ -618,7 +706,7 @@
 
     // 账号页的昵称可能先渲染，资料容器稍后才挂载。沿昵称祖先向上找同时包含
     // 账号统计或简介节点的最小容器，避免把整页 body 当成店铺资料区域。
-    const nickSelector = '[class^="nick--sP8UifWP"], [class*=" nick--sP8UifWP"]';
+    const nickSelector = '[class^="nick--"], [class*=" nick--"]';
     const structureSelector = [
       '[class^="infoCenterText--"]', '[class*=" infoCenterText--"]',
       '[class^="bottom--"]', '[class*=" bottom--"]'
@@ -640,9 +728,10 @@
     const infoValues = [...(exactInfoScope?.querySelectorAll?.('[class^="infoCenterText--"], [class*=" infoCenterText--"]') || [])]
       .map(node => oneLine(node.textContent || '', 200))
       .filter(Boolean);
+    const accountNickSelector = '[class^="nick--"], [class*=" nick--"]';
     const sellerName = oneLine(
-      infoScope?.querySelector?.('[class^="nick--sP8UifWP"], [class*=" nick--sP8UifWP"]')?.textContent
-        || root?.querySelector?.('[class^="nick--sP8UifWP"], [class*=" nick--sP8UifWP"]')?.textContent
+      infoScope?.querySelector?.(accountNickSelector)?.textContent
+        || root?.querySelector?.('[class^="infoTop--"] ' + accountNickSelector)?.textContent
         || infoScope?.querySelector?.('a[href*="/personal"]')?.textContent
         || '',
       500

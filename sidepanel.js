@@ -24,6 +24,7 @@
   let screenParent = 'home';
   let currentPageType = '';
   let storeDataReady = false;
+  let currentStoreStatus = { exists: false, profile: null };
 
   const SCREEN_META = {
     home: { kicker: 'WORKSPACE', title: '闲鱼研究助手', subtitle: '从公开详情页整理同行商品与店铺信息' },
@@ -81,6 +82,35 @@
     const node = $('status');
     node.textContent = message;
     node.className = `status ${kind}`.trim();
+  }
+
+  function renderStoreStatus(pageType, status = {}) {
+    currentStoreStatus = status || { exists: false, profile: null };
+    const isAccount = pageType === 'account';
+    const profile = currentStoreStatus.profile || null;
+    const reviewCount = Number(profile?.reviewCount || 0);
+    const collectedAt = profile?.collectedAt ? formatDate(profile.collectedAt) : '';
+    const collectButton = $('storeCollectButton');
+    const hint = $('storeCollectHint');
+
+    if (!isAccount) {
+      $('storeCurrentState').textContent = '请进入店铺页';
+      if (collectButton) collectButton.textContent = '采集当前店铺页';
+      if (hint) hint.textContent = '请先打开闲鱼卖家账号页；采集完成后会在这里直接显示结果和下载入口。';
+      return;
+    }
+
+    if (currentStoreStatus.exists) {
+      $('storeCurrentState').textContent = `历史已采集 · ${reviewCount} 条评价`;
+      if (collectButton) collectButton.textContent = '重新采集当前店铺页';
+      if (hint) {
+        hint.textContent = `已找到当前店铺的历史记录：${reviewCount} 条评价${collectedAt ? `，最近采集于 ${collectedAt}` : ''}。点击“重新采集当前店铺页”可更新资料和评价，完成后可直接下载 Excel。`;
+      }
+    } else {
+      $('storeCurrentState').textContent = '可采集 · 暂无历史记录';
+      if (collectButton) collectButton.textContent = '采集当前店铺页';
+      if (hint) hint.textContent = '当前店铺还没有本地采集记录；点击采集后，完成状态、评价数量和下载按钮会在这里更新。';
+    }
   }
 
   function sendRuntime(message) {
@@ -197,7 +227,7 @@
       $('storePageTitle').textContent = '当前标签页不是 goofish.com';
       $('storePageUrl').textContent = activeTab?.url || '—';
       $('storePageType').textContent = '不可用';
-      $('storeCurrentState').textContent = '无法采集';
+      renderStoreStatus('', { exists: false, profile: null });
       updateHomePageContext({ title: $('pageTitle').textContent, url: $('pageUrl').textContent });
       setPageButtons(false);
       return;
@@ -223,7 +253,10 @@
       $('storePageTitle').textContent = page?.title || activeTab.title || activeTab.url;
       $('storePageUrl').textContent = page?.url || activeTab.url;
       $('storePageType').textContent = page?.pageType === 'account' ? '店铺页' : page?.pageType === 'detail' ? '详情页' : '搜索页';
-      $('storeCurrentState').textContent = page?.pageType === 'account' ? '可采集' : '请进入店铺页';
+      const storeStatus = page?.pageType === 'account'
+        ? await sendRuntime({ type: 'GET_STORE_STATUS', sellerUrl: page.url || activeTab.url }).catch(() => ({ exists: false, profile: null }))
+        : { exists: false, profile: null };
+      renderStoreStatus(page?.pageType || '', storeStatus);
       updateHomePageContext({
         supported: true,
         pageType: page?.pageType || 'search',
@@ -240,7 +273,7 @@
       $('storePageTitle').textContent = activeTab.title || '闲鱼页面';
       $('storePageUrl').textContent = activeTab.url || '—';
       $('storePageType').textContent = '待刷新';
-      $('storeCurrentState').textContent = '待连接';
+      renderStoreStatus('', { exists: false, profile: null });
       updateHomePageContext({ supported: true, pageType: '', title: activeTab.title || '闲鱼页面', url: activeTab.url });
       setPageButtons(true);
       setStatus(error.message || '暂时无法连接页面；请刷新闲鱼页面后重试。', 'error');
@@ -371,16 +404,28 @@
       });
       if (!result?.ok) throw new Error(result?.error || '采集失败');
       let sellerEnrichment = null;
+      let sellerEnrichmentError = '';
       const currentItem = Array.isArray(result.items) ? result.items[0] : null;
       if (settings.collectSellerInfo !== false && currentItem?.sellerUrl) {
         setStatus('商品已保存，正在读取卖家账号页的简介和公开评价…');
-        sellerEnrichment = await sendRuntime({ type: 'ENRICH_SINGLE_ITEM', item: currentItem }).catch(() => null);
+        try {
+          sellerEnrichment = await sendRuntime({ type: 'ENRICH_SINGLE_ITEM', item: currentItem });
+          if (!sellerEnrichment?.ok) throw new Error(sellerEnrichment?.error || sellerEnrichment?.reason || '卖家账号页资料没有返回');
+        } catch (error) {
+          sellerEnrichmentError = error?.message || String(error);
+        }
       }
       await refreshCount();
       const count = Number(result.count ?? result.added ?? 0);
       if (count) {
         const suffix = sellerEnrichment?.enriched ? '，店铺简介和公开评价已补充' : '';
-        setStatus(`当前详情页已采集并保存 ${count} 条记录${suffix}。`, 'success');
+        if (sellerEnrichmentError) {
+          setStatus(`当前详情页已保存 ${count} 条记录，但卖家资料补充失败：${sellerEnrichmentError}。商品详情仍已保留。`, 'warning');
+        } else if (settings.collectSellerInfo === false) {
+          setStatus(`当前详情页已采集并保存 ${count} 条记录；卖家资料补充已在设置中关闭。`, 'warning');
+        } else {
+          setStatus(`当前详情页已采集并保存 ${count} 条记录${suffix}。`, 'success');
+        }
       }
       else if (selectedMode === 'api') setStatus('页面没有捕获到可识别的公开详情接口；可以切换页面详情模式重试。', 'error');
       else setStatus('当前页面暂未识别到商品，请等待加载或滚动后重试。', 'error');
@@ -396,6 +441,7 @@
   async function collectCurrentStorePage() {
     if (!activeTab?.id) return;
     const button = $('storeCollectButton');
+    const hadHistory = Boolean(currentStoreStatus?.exists);
     button.disabled = true;
     button.textContent = '正在加载全部公开评价…';
     $('storeCollectHint').textContent = '正在读取店铺资料并滚动评价区域，请保持当前店铺页打开。';
@@ -412,8 +458,8 @@
       const reviewCount = Number(result.reviewCount || result.reviewCountLoaded || result.reviews?.length || 0);
       storeDataReady = true;
       $('storeExportButton').disabled = false;
-      setStatus(`当前店铺页已采集完成：保存 1 份店铺资料，读取 ${reviewCount} 条公开评价；评价图片会随 Excel 一起下载。`, 'success');
-      $('storeCollectHint').textContent = `已读取 ${reviewCount} 条评价；可以直接点击“立即下载 Excel”，也可以打开数据中心查看当前数据。`;
+      setStatus(`${hadHistory ? '当前店铺页历史记录已更新' : '当前店铺页首次采集完成'}：保存 1 份店铺资料，读取 ${reviewCount} 条公开评价；评价图片会随 Excel 一起下载。`, 'success');
+      $('storeCollectHint').textContent = `${hadHistory ? '历史数据已更新' : '本地没有历史记录，已新建记录'}：本次读取 ${reviewCount} 条评价。现在可以直接点击“立即下载 Excel”，不需要再去数据中心。`;
     } catch (error) {
       setStatus(error.message || '店铺页采集失败，请刷新账号页后重试。', 'error');
       $('storeCollectHint').textContent = '如果评价区仍在加载，请停留几秒后重试。';

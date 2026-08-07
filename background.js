@@ -119,6 +119,39 @@ function itemKey(item) {
   return `text:${[item.title, item.sellerName, item.price].join('|')}`;
 }
 
+function isInternalCategory(value) {
+  return /^类目ID\s*\d+$/i.test(cleanText(value || '', 200));
+}
+
+function preferCategoryValue(oldValue, newValue) {
+  const oldCategory = cleanText(oldValue || '', 500);
+  const newCategory = cleanText(newValue || '', 500);
+  if (!oldCategory) return newCategory;
+  if (!newCategory) return oldCategory;
+  if (isInternalCategory(oldCategory) && !isInternalCategory(newCategory)) return newCategory;
+  if (!isInternalCategory(oldCategory) && isInternalCategory(newCategory)) return oldCategory;
+  return newCategory;
+}
+
+function mergeItemValues(old, item) {
+  const merged = { ...old };
+  for (const [field, value] of Object.entries(item || {})) {
+    if (ARRAY_FIELDS.has(field)) continue;
+    if (field === 'category') {
+      if (value) {
+        merged.category = preferCategoryValue(old.category, value);
+      } else if (isInternalCategory(old.category) && /(?:^|,)dom(?:,|$)/i.test(item.dataSource || '')) {
+        // 当前 DOM 明确没有公开类目名称时，不把接口里的内部 categoryId 导出为类目。
+        merged.category = '';
+      }
+      continue;
+    }
+    // 异步接口或二次 DOM 扫描的空值不能覆盖已经成功识别的字段。
+    if (value !== undefined && value !== null && String(value) !== '') merged[field] = value;
+  }
+  return merged;
+}
+
 function mergeArrayValues(first, second) {
   return [...new Set([...(first || []), ...(second || [])].filter(Boolean))];
 }
@@ -136,7 +169,7 @@ function mergeItems(previous, incoming) {
 
     const key = itemKey(item);
     const old = byKey.get(key) || {};
-    const merged = { ...old, ...item };
+    const merged = mergeItemValues(old, item);
 
     for (const field of ARRAY_FIELDS) {
       merged[field] = mergeArrayValues(old[field], item[field]);
@@ -848,11 +881,15 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
   if (!sellerUrl) return { kind: 'unavailable', job };
 
   const key = sellerProfileKey(sellerUrl);
-  const cached = job.sellerProfiles?.[key];
+  const cached = job.sellerProfiles?.[key]
+    || (await readStoreProfiles()).find(profile => sellerProfileKey(profile?.sellerUrl || '') === key);
   const identity = itemIdentity(item);
   if (cached) {
     await mergeStoredItemWithProfile(identity, cached);
-    return { kind: 'cached', job };
+    return { kind: 'cached', job: {
+      ...job,
+      sellerProfiles: { ...(job.sellerProfiles || {}), [key]: cached }
+    } };
   }
 
   const waiting = jobMessage({
@@ -1588,6 +1625,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'GET_STATUS':
         return { ok: true, count: (await readItems()).length, storeCount: (await readStoreProfiles()).length };
+
+      case 'GET_STORE_STATUS': {
+        const sellerUrl = validSellerUrl(message.sellerUrl || sender?.tab?.url || '');
+        const profiles = await readStoreProfiles();
+        const key = sellerProfileKey(sellerUrl);
+        const profile = key
+          ? profiles.find(item => sellerProfileKey(item?.sellerUrl || '') === key) || null
+          : null;
+        return {
+          ok: true,
+          exists: Boolean(profile),
+          storeCount: profiles.length,
+          profile: profile ? {
+            sellerName: profile.sellerName,
+            sellerUrl: profile.sellerUrl,
+            reviewCount: Number(profile.reviewCountLoaded || profile.reviews?.length || 0),
+            collectedAt: profile.collectedAt,
+            sellerGoodRate: profile.sellerGoodRate || ''
+          } : null
+        };
+      }
 
       case 'GET_SETTINGS':
         return { ok: true, settings: await readSettings() };
