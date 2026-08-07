@@ -11,6 +11,8 @@ const MAX_ITEMS = 2000;
 const MAX_STORE_PROFILES = 200;
 const MAX_STORE_REVIEWS = 1000;
 const MAX_HISTORY = 50;
+const TAB_MESSAGE_TIMEOUT_MS = 12000;
+const JOB_STALE_TIMEOUT_MS = 90000;
 
 const DEFAULT_SETTINGS = Object.freeze({
   mode: 'rpa',
@@ -430,6 +432,33 @@ function jobMessage(job, message) {
   };
 }
 
+function jobUpdatedAt(job) {
+  return Date.parse(job?.updatedAt || job?.createdAt || '') || 0;
+}
+
+async function recoverStaleJob(job) {
+  if (!jobIsActive(job)) return job;
+
+  const updatedAt = jobUpdatedAt(job);
+  const age = updatedAt ? Date.now() - updatedAt : JOB_STALE_TIMEOUT_MS + 1;
+  if (age < JOB_STALE_TIMEOUT_MS) return job;
+
+  // “ready-to-collect” 只表示闹钟可能漏掉了，不应直接把任务判死；重新排一个
+  // 短闹钟可以修复扩展重载/Service Worker 睡眠后遗失的单次 alarm。
+  if (job.status === 'ready-to-collect') {
+    return scheduleJob(job, 'ready-to-collect', 250);
+  }
+
+  const reason = job.status === 'waiting-page'
+    ? '采集标签页长时间没有完成加载'
+    : '页面长时间没有返回采集结果';
+  return finishJob(
+    { ...job, staleRecovered: true },
+    'failed',
+    `${reason}（超过 ${Math.round(JOB_STALE_TIMEOUT_MS / 1000)} 秒），已自动释放任务锁；已经采集的数据仍保留，请重新开始。`
+  );
+}
+
 function tabsCreate(options) {
   return new Promise((resolve, reject) => {
     chrome.tabs.create(options, tab => {
@@ -491,13 +520,31 @@ function waitForTabComplete(tabId, timeoutMs = 25000) {
   });
 }
 
-function sendTabMessage(tabId, message) {
+function sendTabMessage(tabId, message, timeoutMs = TAB_MESSAGE_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(tabId, message, response => {
-      const error = chrome.runtime.lastError;
-      if (error) reject(new Error(error.message));
+    let settled = false;
+    const timer = setTimeout(() => finish(
+      new Error(`页面响应超时（${message?.type || '未知消息'}），请刷新闲鱼页面后重试。`)
+    ), Math.max(1000, Number(timeoutMs) || TAB_MESSAGE_TIMEOUT_MS));
+
+    function finish(error, response) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
       else resolve(response);
-    });
+    }
+
+    try {
+      chrome.tabs.sendMessage(tabId, message, response => {
+        if (settled) return;
+        const error = chrome.runtime.lastError;
+        if (error) finish(new Error(error.message));
+        else finish(null, response);
+      });
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error(String(error)));
+    }
   });
 }
 
@@ -1416,7 +1463,7 @@ async function processJobAlarm() {
 }
 
 async function startLinksJob(links, delayMs = 1500, mode = 'rpa') {
-  const current = await readJob();
+  const current = await recoverStaleJob(await readJob());
   if (jobIsActive(current)) throw new Error('已有采集任务正在运行，请先停止当前任务。');
 
   const settings = await readSettings();
@@ -1447,7 +1494,7 @@ async function startLinksJob(links, delayMs = 1500, mode = 'rpa') {
 }
 
 async function startSearchJob(startUrl, targetCount, maxPages, delayMs = 1800, mode = 'rpa') {
-  const current = await readJob();
+  const current = await recoverStaleJob(await readJob());
   if (jobIsActive(current)) throw new Error('已有采集任务正在运行，请先停止当前任务。');
 
   let parsedStart;
@@ -1704,7 +1751,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return { ok: true, count: 0 };
 
       case 'GET_JOB_STATUS':
-        return { ok: true, job: await readJob() };
+        return { ok: true, job: await recoverStaleJob(await readJob()) };
 
       case 'START_BATCH_LINKS': {
         const links = [...new Set((Array.isArray(message.links) ? message.links : [])
@@ -1727,7 +1774,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'STOP_JOB': {
-        const job = await readJob();
+        const job = await recoverStaleJob(await readJob());
         if (!job || !jobIsActive(job)) return { ok: true, job };
         const stopped = await finishJob(job, 'stopped', '任务已由用户停止。');
         return { ok: true, job: stopped };

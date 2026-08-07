@@ -12,6 +12,7 @@
   const MAX_NETWORK_BUFFER = 120;
   const MAX_RAW_NETWORK_BUFFER = 8;
   const MAX_DIAGNOSTIC_STRING = 10000;
+  const RUNTIME_MESSAGE_TIMEOUT_MS = 12000;
   const pageItems = new Map();
   const networkBuffer = [];
   const rawNetworkBuffer = [];
@@ -1380,6 +1381,34 @@
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  function sendRuntimeRequest(message, timeoutMs = RUNTIME_MESSAGE_TIMEOUT_MS) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => finish(
+        new Error(`扩展后台响应超时（${message?.type || '未知消息'}），请刷新闲鱼页面后重试。`)
+      ), Math.max(1000, Number(timeoutMs) || RUNTIME_MESSAGE_TIMEOUT_MS));
+
+      function finish(error, response) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error) reject(error);
+        else resolve(response);
+      }
+
+      try {
+        chrome.runtime.sendMessage(message, response => {
+          if (settled) return;
+          const error = chrome.runtime.lastError;
+          if (error) finish(new Error(error.message));
+          else finish(null, response);
+        });
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
   async function activateReviewTab() {
     const reviewCards = document.querySelectorAll('[class^="rateItem--"], [class*=" rateItem--"]');
     if (reviewCards.length) return;
@@ -1432,7 +1461,7 @@
     profile.reviewCountLoaded = reviews.length;
     profile.collectedAt = new Date().toISOString();
     try {
-      const saved = await chrome.runtime.sendMessage({
+      const saved = await sendRuntimeRequest({
         type: 'COLLECT_STORE_PROFILE',
         profile,
         sourcePage: location.href
@@ -1627,7 +1656,7 @@
     const finalItems = isDetailPage() ? finalDetailItems(items) : [];
     if (!finalItems.length) return { ok: true, count: 0, total: pageItems.size, reason, ignored: true };
     try {
-      const result = await chrome.runtime.sendMessage({
+      const result = await sendRuntimeRequest({
         type: 'COLLECT_ITEMS',
         items: finalItems,
         sourcePage: location.href,
@@ -1670,12 +1699,19 @@
         return false;
       }
       captureEnabled = true;
-      const found = scanDom();
-      sendItems(found, 'manual').then(result => sendResponse({
-        ...result,
+      Promise.resolve().then(async () => {
+        const found = scanDom();
+        const result = await sendItems(found, 'manual');
+        sendResponse({
+          ...result,
+          pageType: pageType(),
+          pageItems: pageItems.size,
+          items: found
+        });
+      }).catch(error => sendResponse({
+        ok: false,
         pageType: pageType(),
-        pageItems: pageItems.size,
-        items: found
+        error: error?.message || String(error)
       }));
       return true;
     }
@@ -1693,28 +1729,41 @@
       captureEnabled = true;
       document.dispatchEvent(new CustomEvent(API_SNAPSHOT_REQUEST));
       setTimeout(async () => {
-        // 接口响应可能在扩展刚加载前就完成，因此用当前详情 DOM 做一次轻量合并，
-        // 让“接口观察”在旧标签页上也有可解释的回退结果。
-        const domFound = scanDom();
-        const currentItemId = extractItemIdFromUrl(location.href);
-        const detailNetwork = networkBuffer.filter(item => {
-          if (currentItemId) {
-            return cleanText(item?.itemId, 200) === currentItemId
-              || extractItemIdFromUrl(item?.itemUrl || '') === currentItemId;
-          }
-          return sameDetailIdentity(item);
-        });
-        const foundByKey = new Map([...detailNetwork, ...domFound].filter(sameDetailIdentity).map(item => [itemKey(item), item]));
-        const found = [...foundByKey.values()];
-        const result = await sendItems(found, 'api-snapshot');
-        sendResponse({
-          ...result,
-          pageType: 'detail',
-          mode: 'api',
-          pageItems: pageItems.size,
-          buffered: found.length,
-          items: found
-        });
+        try {
+          // 接口响应可能在扩展刚加载前就完成，因此用当前详情 DOM 做一次轻量合并，
+          // 让“接口观察”在旧标签页上也有可解释的回退结果。
+          const domFound = scanDom();
+          const currentItemId = extractItemIdFromUrl(location.href);
+          const detailNetwork = networkBuffer.filter(item => {
+            if (currentItemId) {
+              return cleanText(item?.itemId, 200) === currentItemId
+                || extractItemIdFromUrl(item?.itemUrl || '') === currentItemId;
+            }
+            return sameDetailIdentity(item);
+          });
+          const foundByKey = new Map([...detailNetwork, ...domFound]
+            .filter(sameDetailIdentity)
+            .map(item => [itemKey(item), item]));
+          const found = [...foundByKey.values()];
+          const result = await sendItems(found, 'api-snapshot');
+          sendResponse({
+            ...result,
+            pageType: 'detail',
+            mode: 'api',
+            pageItems: pageItems.size,
+            buffered: found.length,
+            items: found
+          });
+        } catch (error) {
+          // 任何 DOM/API 解析异常都必须结束这次消息；否则后台会一直等待，
+          // 任务就会把所有采集入口锁在“处理中”。
+          sendResponse({
+            ok: false,
+            pageType: pageType(),
+            mode: 'api',
+            error: error?.message || String(error)
+          });
+        }
       }, 150);
       return true;
     }

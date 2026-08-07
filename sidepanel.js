@@ -14,6 +14,7 @@
     notifyOnComplete: true,
     keepHistoryDays: 30
   };
+  const TAB_MESSAGE_TIMEOUT_MS = 12000;
 
   let activeTab = null;
   let settings = { ...DEFAULT_SETTINGS };
@@ -127,13 +128,31 @@
     });
   }
 
-  function sendToTab(tabId, message) {
+  function sendToTab(tabId, message, timeoutMs = TAB_MESSAGE_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
-      chrome.tabs.sendMessage(tabId, message, response => {
-        const error = chrome.runtime.lastError;
-        if (error) reject(new Error(error.message));
+      let settled = false;
+      const timer = setTimeout(() => finish(
+        new Error(`页面响应超时（${message?.type || '未知消息'}），请刷新闲鱼页面后重试。`)
+      ), Math.max(1000, Number(timeoutMs) || TAB_MESSAGE_TIMEOUT_MS));
+
+      function finish(error, response) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error) reject(error);
         else resolve(response);
-      });
+      }
+
+      try {
+        chrome.tabs.sendMessage(tabId, message, response => {
+          if (settled) return;
+          const error = chrome.runtime.lastError;
+          if (error) finish(new Error(error.message));
+          else finish(null, response);
+        });
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
