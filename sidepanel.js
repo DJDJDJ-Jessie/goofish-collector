@@ -92,6 +92,10 @@
     const collectedAt = profile?.collectedAt ? formatDate(profile.collectedAt) : '';
     const collectButton = $('storeCollectButton');
     const hint = $('storeCollectHint');
+    const storeExportButton = $('storeExportButton');
+    if (storeExportButton) {
+      storeExportButton.disabled = !isAccount || !currentStoreStatus.exists || $('taskRail')?.dataset.active === 'true';
+    }
 
     if (!isAccount) {
       $('storeCurrentState').textContent = '请进入店铺页';
@@ -290,7 +294,7 @@
     storeDataReady = Number(response.storeCount || 0) > 0;
     const storeExportButton = $('storeExportButton');
     if (storeExportButton) {
-      storeExportButton.disabled = !storeDataReady || $('taskRail')?.dataset.active === 'true';
+      storeExportButton.disabled = currentPageType !== 'account' || !currentStoreStatus.exists || $('taskRail')?.dataset.active === 'true';
     }
   }
 
@@ -332,7 +336,7 @@
       $('stopJobButton').disabled = true;
       $('stopJobButton').textContent = '停止任务';
       $('taskExportButton').disabled = true;
-      if ($('storeExportButton')) $('storeExportButton').disabled = !storeDataReady;
+      if ($('storeExportButton')) $('storeExportButton').disabled = currentPageType !== 'account' || !currentStoreStatus.exists;
       setPageButtons(Boolean(activeTab && isGoofishUrl(activeTab.url || '')));
       return;
     }
@@ -348,7 +352,7 @@
     $('stopJobButton').disabled = !active;
     $('stopJobButton').textContent = active ? '停止任务' : '任务已结束';
     $('taskExportButton').disabled = active || Number(job.collected || 0) === 0;
-    if ($('storeExportButton')) $('storeExportButton').disabled = active || !storeDataReady;
+    if ($('storeExportButton')) $('storeExportButton').disabled = active || currentPageType !== 'account' || !currentStoreStatus.exists;
 
     const progress = job.type === 'links'
       ? `详情链接 ${Math.min(Number(job.index || 0), job.links?.length || 0)}/${job.links?.length || 0}，成功 ${job.collected || 0} 条`
@@ -665,7 +669,7 @@
     } catch (error) {
       setStatus(error.message || '导出失败，请稍后重试。', 'error');
     } finally {
-      button.disabled = isStoreExport ? !storeDataReady : false;
+      button.disabled = isStoreExport ? (currentPageType !== 'account' || !currentStoreStatus.exists) : false;
       button.textContent = idleLabel;
     }
   }
