@@ -523,9 +523,60 @@
     return extractLabelValue(root, ['卖家', '店铺', '用户', '昵称']);
   }
 
+  function isSellerPageUrl(value) {
+    const url = toAbsoluteUrl(value || '');
+    if (!url) return false;
+    try {
+      const parsed = new URL(url, location.href);
+      return /^\/personal(?:[/?#]|$)/i.test(parsed.pathname)
+        && parsed.hostname.endsWith('goofish.com');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function sellerAnchorFromRoot(root) {
+    if (!root?.querySelectorAll) return null;
+
+    const nickNode = root.querySelector(
+      '[class*="item-user-info-nick"], [data-testid*="seller"], [data-testid*="user"], [class*="seller-name"], [class*="shop-name"]'
+    );
+    const nearestAnchor = nickNode?.closest?.('a[href]');
+    if (nearestAnchor && isSellerPageUrl(nearestAnchor.href)) return nearestAnchor;
+
+    const candidates = [...root.querySelectorAll('a[href]')]
+      .filter(anchor => isSellerPageUrl(anchor.href))
+      .map(anchor => {
+        const text = oneLine(anchor.textContent || '', 800);
+        const hasSellerStats = /(?:来闲鱼|开店|入驻|卖出|好评率|粉丝|关注)/.test(text);
+        const hasSellerNode = Boolean(anchor.querySelector(
+          '[class*="item-user-info"], [class*="seller"], [class*="shop"]'
+        ));
+        return {
+          anchor,
+          score: (hasSellerStats ? 4 : 0) + (hasSellerNode ? 3 : 0) + (anchor.target === '_blank' ? 1 : 0)
+        };
+      })
+      .sort((first, second) => second.score - first.score);
+
+    return candidates[0]?.anchor || null;
+  }
+
+  function sellerEntryFromRoot(root) {
+    const anchor = sellerAnchorFromRoot(root);
+    const nickNode = root?.querySelector?.(
+      '[class*="item-user-info-nick"], [data-testid*="seller"], [data-testid*="user"], [class*="seller-name"], [class*="shop-name"]'
+    );
+    return {
+      sellerName: oneLine(nickNode?.textContent || anchor?.textContent || sellerNameFromRoot(root), 500),
+      sellerUrl: anchor && isSellerPageUrl(anchor.href) ? toAbsoluteUrl(anchor.href) : '',
+      clickable: Boolean(anchor || nickNode),
+      text: oneLine(anchor?.textContent || nickNode?.parentElement?.textContent || '', 1000)
+    };
+  }
+
   function sellerUrlFromRoot(root) {
-    const node = root?.querySelector?.('a[href*="/personal"]');
-    return toAbsoluteUrl(node?.href || '');
+    return sellerEntryFromRoot(root).sellerUrl;
   }
 
   function sellerLabelsFromRoot(root) {
@@ -1909,6 +1960,25 @@
         title: document.title,
         pageType: pageType(),
         pageItems: pageItems.size
+      });
+      return false;
+    }
+
+    if (message?.type === 'GET_SELLER_ENTRY') {
+      if (!isDetailPage()) {
+        sendResponse({
+          ok: false,
+          pageType: pageType(),
+          error: '当前不是商品详情页。'
+        });
+        return false;
+      }
+      const entry = sellerEntryFromRoot(document.body);
+      sendResponse({
+        ok: true,
+        pageType: 'detail',
+        ...entry,
+        sourcePage: location.href
       });
       return false;
     }

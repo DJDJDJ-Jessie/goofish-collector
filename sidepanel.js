@@ -527,7 +527,7 @@
       if (count) {
         let enrichedCount = 0;
         for (const item of [...pendingCurrentItems]) {
-          if (!item?.sellerUrl) continue;
+          if (!item || (!item.itemId && !item.itemUrl)) continue;
           setStatus('商品详情已读取，正在进入卖家店铺页补充基础公开资料…');
           try {
             const enrichment = await sendRuntime({

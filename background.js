@@ -1016,6 +1016,20 @@ async function fetchSellerProfileInTab(tabId, sellerUrl, returnUrl) {
   }
 }
 
+async function discoverSellerEntry(tabId) {
+  const numericTabId = Number(tabId);
+  if (!Number.isInteger(numericTabId)) return null;
+  const info = await ensureContentReceiver(numericTabId);
+  if (info?.pageType !== 'detail') return null;
+  const entry = await sendTabMessage(numericTabId, { type: 'GET_SELLER_ENTRY' });
+  const sellerUrl = validSellerUrl(entry?.sellerUrl || '');
+  if (!sellerUrl) return null;
+  return {
+    ...entry,
+    sellerUrl
+  };
+}
+
 function collectedItemForLink(result, link) {
   const items = [
     ...(Array.isArray(result?.items) ? result.items : []),
@@ -1029,23 +1043,46 @@ function collectedItemForLink(result, link) {
 
 async function prepareSellerEnrichment(job, item, pendingCount) {
   if (job.collectSellerInfo === false) return { kind: 'disabled', job };
-  const sellerUrl = validSellerUrl(item?.sellerUrl || '');
+  let currentItem = sanitizeItem(item || {});
+  let sellerUrl = validSellerUrl(currentItem?.sellerUrl || '');
+  if (!sellerUrl && job.tabId) {
+    try {
+      const discovered = await discoverSellerEntry(job.tabId);
+      sellerUrl = validSellerUrl(discovered?.sellerUrl || '');
+      if (sellerUrl && currentItem) {
+        currentItem = sanitizeItem({
+          ...currentItem,
+          sellerUrl,
+          sellerName: currentItem.sellerName || discovered.sellerName || ''
+        });
+      }
+    } catch (_) {
+      // 详情页仍在渲染时先保留原结果，后续任务重试会再次发现卖家入口。
+    }
+  }
   if (!sellerUrl) return { kind: 'unavailable', job };
 
+  const jobWithSellerEntry = currentItem
+    ? {
+        ...job,
+        stagedItems: mergeItems(Array.isArray(job.stagedItems) ? job.stagedItems : [], [currentItem])
+      }
+    : job;
+
   const key = sellerProfileKey(sellerUrl);
-  const cached = job.sellerProfiles?.[key]
+  const cached = jobWithSellerEntry.sellerProfiles?.[key]
     || (await readStoreProfiles()).find(profile => sellerProfileKey(profile?.sellerUrl || '') === key);
-  const identity = itemIdentity(item);
+  const identity = itemIdentity(currentItem);
   if (cached) {
-    const stagedJob = mergeStagedItemWithProfile(job, item, cached);
+    const stagedJob = mergeStagedItemWithProfile(jobWithSellerEntry, currentItem, cached);
     return { kind: 'cached', job: {
       ...stagedJob,
-      sellerProfiles: { ...(job.sellerProfiles || {}), [key]: cached }
+      sellerProfiles: { ...(jobWithSellerEntry.sellerProfiles || {}), [key]: cached }
     } };
   }
 
   const waiting = jobMessage({
-    ...job,
+    ...jobWithSellerEntry,
     status: 'waiting-page',
     stage: 'account-page',
     pendingItem: identity,
@@ -1905,12 +1942,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'ENRICH_SINGLE_ITEM': {
-        const item = sanitizeItem(message.item || {}, sender?.tab?.url || '');
-        const sellerUrl = validSellerUrl(item?.sellerUrl || '');
-        if (!item || !sellerUrl) {
-          return { ok: true, enriched: false, reason: '当前详情页没有公开的卖家账号页链接。' };
+        let item = sanitizeItem(message.item || {}, sender?.tab?.url || '');
+        const requestedTabId = Number(message.tabId ?? sender?.tab?.id);
+        let sellerUrl = validSellerUrl(item?.sellerUrl || '');
+        if (!sellerUrl && Number.isInteger(requestedTabId)) {
+          try {
+            const discovered = await discoverSellerEntry(requestedTabId);
+            sellerUrl = validSellerUrl(discovered?.sellerUrl || '');
+            if (sellerUrl && item) {
+              item = sanitizeItem({
+                ...item,
+                sellerUrl,
+                sellerName: item.sellerName || discovered.sellerName || ''
+              }, sender?.tab?.url || '');
+            }
+          } catch (_) {
+            // 没有发现入口时返回可解释结果，前端仍保留商品详情结果。
+          }
         }
-        const requestedTabId = Number(message.tabId);
+        if (!item || !sellerUrl) {
+          return {
+            ok: true,
+            enriched: false,
+            sellerEntryFound: false,
+            reason: '当前详情页暂未发现卖家账号页入口，请等待卖家信息渲染后重试。'
+          };
+        }
         const profile = Number.isInteger(requestedTabId)
           ? await fetchSellerProfileInTab(requestedTabId, sellerUrl, message.returnUrl || item.itemUrl)
           : await fetchSellerProfile(sellerUrl);
