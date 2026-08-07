@@ -29,6 +29,10 @@
   let pendingCurrentItems = [];
   let pendingCurrentSourceUrl = '';
   let currentItemsCommitted = false;
+  let pendingCurrentStoreProfile = null;
+  let pendingCurrentStoreSourceUrl = '';
+  let currentStoreCommitted = false;
+  let dataTab = 'products';
   let currentTaskJob = null;
 
   const SCREEN_META = {
@@ -111,6 +115,28 @@
     renderCurrentResultActions();
   }
 
+  function clearCurrentStoreResult() {
+    pendingCurrentStoreProfile = null;
+    pendingCurrentStoreSourceUrl = '';
+    currentStoreCommitted = false;
+    renderStoreStatus(currentPageType, currentStoreStatus);
+  }
+
+  function hasCurrentStoreData() {
+    return Boolean(currentStoreStatus?.exists || pendingCurrentStoreProfile);
+  }
+
+  function setDataTab(tab = 'products') {
+    dataTab = tab === 'stores' ? 'stores' : 'products';
+    const products = dataTab === 'products';
+    $('dataProductsTab')?.classList.toggle('is-selected', products);
+    $('dataStoresTab')?.classList.toggle('is-selected', !products);
+    $('dataProductsTab')?.setAttribute('aria-selected', String(products));
+    $('dataStoresTab')?.setAttribute('aria-selected', String(!products));
+    $('dataProductsPanel')?.classList.toggle('is-hidden', !products);
+    $('dataStoresPanel')?.classList.toggle('is-hidden', products);
+  }
+
   function renderStoreStatus(pageType, status = {}) {
     currentStoreStatus = status || { exists: false, profile: null };
     const isAccount = pageType === 'account';
@@ -120,8 +146,15 @@
     const collectButton = $('storeCollectButton');
     const hint = $('storeCollectHint');
     const storeExportButton = $('storeExportButton');
+    const storeCommitButton = $('storeCommitButton');
+    const hasStoreData = hasCurrentStoreData();
+    const hasPendingStore = Boolean(pendingCurrentStoreProfile);
     if (storeExportButton) {
-      storeExportButton.disabled = !isAccount || !currentStoreStatus.exists || $('taskRail')?.dataset.active === 'true';
+      storeExportButton.disabled = !isAccount || !hasStoreData || $('taskRail')?.dataset.active === 'true';
+    }
+    if (storeCommitButton) {
+      storeCommitButton.disabled = !isAccount || !hasPendingStore || currentStoreCommitted || $('taskRail')?.dataset.active === 'true';
+      storeCommitButton.textContent = currentStoreCommitted ? '已加入数据中心店铺表' : '加到数据中心店铺表';
     }
 
     if (!isAccount) {
@@ -131,16 +164,21 @@
       return;
     }
 
-    if (currentStoreStatus.exists) {
-      $('storeCurrentState').textContent = `历史已采集 · ${reviewCount} 条评价`;
+    if (hasPendingStore) {
+      const pendingReviewCount = Number(pendingCurrentStoreProfile?.reviewCountLoaded || pendingCurrentStoreProfile?.reviews?.length || 0);
+      $('storeCurrentState').textContent = `${currentStoreCommitted ? '已加入数据中心' : '本次已采集'} · ${pendingReviewCount} 条评价`;
       if (collectButton) collectButton.textContent = '重新采集当前店铺页';
       if (hint) {
-        hint.textContent = `已找到当前店铺的历史记录：${reviewCount} 条评价${collectedAt ? `，最近采集于 ${collectedAt}` : ''}。点击“重新采集当前店铺页”可更新资料和评价，完成后可直接下载 Excel。`;
+        hint.textContent = `本次已读取 ${pendingReviewCount} 条评价，结果已暂存；可以直接下载店铺 Excel，也可以点击“加到数据中心店铺表”。`;
       }
+    } else if (currentStoreStatus.exists) {
+      $('storeCurrentState').textContent = `历史已采集 · ${reviewCount} 条评价`;
+      if (collectButton) collectButton.textContent = '重新采集当前店铺页';
+      if (hint) hint.textContent = `已找到当前店铺的历史记录：${reviewCount} 条评价${collectedAt ? `，最近采集于 ${collectedAt}` : ''}。重新采集会先生成本次结果，确认后再加入店铺表。`;
     } else {
       $('storeCurrentState').textContent = '可采集 · 暂无历史记录';
       if (collectButton) collectButton.textContent = '采集当前店铺页';
-      if (hint) hint.textContent = '当前店铺还没有本地采集记录；点击采集后，完成状态、评价数量和下载按钮会在这里更新。';
+      if (hint) hint.textContent = '当前店铺还没有本地采集记录；点击采集后会在这里显示完成状态、评价数量和下载入口。';
     }
   }
 
@@ -264,6 +302,9 @@
     if (pendingCurrentSourceUrl && activeTab?.url && pendingCurrentSourceUrl !== activeTab.url) {
       clearCurrentResult();
     }
+    if (pendingCurrentStoreSourceUrl && activeTab?.url && pendingCurrentStoreSourceUrl !== activeTab.url) {
+      clearCurrentStoreResult();
+    }
     const supported = Boolean(activeTab && isGoofishUrl(activeTab.url || ''));
     const badge = $('siteBadge');
 
@@ -338,12 +379,20 @@
     $('itemCount').textContent = response.count;
     $('dataNumber').textContent = response.count;
     $('homeItemCount').textContent = response.count;
+    $('dataProductsCount').textContent = response.count;
+    $('homeStoreCount').textContent = response.storeCount || 0;
+    $('dataStoreNumber').textContent = response.storeCount || 0;
+    $('dataStoresCount').textContent = response.storeCount || 0;
     $('storeCount').textContent = response.storeCount || 0;
     storeDataReady = Number(response.storeCount || 0) > 0;
     const storeExportButton = $('storeExportButton');
     if (storeExportButton) {
-      storeExportButton.disabled = currentPageType !== 'account' || !currentStoreStatus.exists || $('taskRail')?.dataset.active === 'true';
+      storeExportButton.disabled = currentPageType !== 'account' || !hasCurrentStoreData() || $('taskRail')?.dataset.active === 'true';
     }
+    const storeCommitButton = $('storeCommitButton');
+    if (storeCommitButton) storeCommitButton.disabled = currentPageType !== 'account' || !pendingCurrentStoreProfile || currentStoreCommitted;
+    const storeDataExportButton = $('storeDataExportButton');
+    if (storeDataExportButton) storeDataExportButton.disabled = !storeDataReady;
   }
 
   function jobIsActive(job) {
@@ -389,7 +438,8 @@
         $('taskCommitButton').disabled = true;
         $('taskCommitButton').textContent = '加到数据中心商品表';
       }
-      if ($('storeExportButton')) $('storeExportButton').disabled = currentPageType !== 'account' || !currentStoreStatus.exists;
+      if ($('storeExportButton')) $('storeExportButton').disabled = currentPageType !== 'account' || !hasCurrentStoreData();
+      if ($('storeCommitButton')) $('storeCommitButton').disabled = currentPageType !== 'account' || !pendingCurrentStoreProfile || currentStoreCommitted;
       setPageButtons(Boolean(activeTab && isGoofishUrl(activeTab.url || '')));
       return;
     }
@@ -413,7 +463,8 @@
         ? '已加入数据中心商品表'
         : '加到数据中心商品表';
     }
-    if ($('storeExportButton')) $('storeExportButton').disabled = active || currentPageType !== 'account' || !currentStoreStatus.exists;
+    if ($('storeExportButton')) $('storeExportButton').disabled = active || currentPageType !== 'account' || !hasCurrentStoreData();
+    if ($('storeCommitButton')) $('storeCommitButton').disabled = active || currentPageType !== 'account' || !pendingCurrentStoreProfile || currentStoreCommitted;
 
     const progress = job.type === 'links'
       ? `详情链接 ${Math.min(Number(job.index || 0), job.links?.length || 0)}/${job.links?.length || 0}，成功 ${job.collected || 0} 条`
@@ -472,11 +523,30 @@
       pendingCurrentItems = Array.isArray(result.items) ? result.items.filter(Boolean) : [];
       pendingCurrentSourceUrl = activeTab.url || '';
       currentItemsCommitted = false;
-      renderCurrentResultActions();
       const count = pendingCurrentItems.length || Number(result.count ?? result.added ?? 0);
       if (count) {
-        $('currentCollectHint').textContent = `当前详情页采集完成：${count} 条商品结果已暂存。请选择“加到数据中心商品表”或“导出当前详情页”。店铺评价请单独进入店铺页采集。`;
-        setStatus(`当前详情页采集完成：${count} 条结果已暂存，等待你选择加入总表或单独导出。`, 'success');
+        let enrichedCount = 0;
+        for (const item of [...pendingCurrentItems]) {
+          if (!item?.sellerUrl) continue;
+          setStatus('商品详情已读取，正在进入卖家店铺页补充基础公开资料…');
+          try {
+            const enrichment = await sendRuntime({ type: 'ENRICH_SINGLE_ITEM', item });
+            if (enrichment?.item) {
+              pendingCurrentItems = pendingCurrentItems.map(candidate => (
+                (candidate.itemId && candidate.itemId === enrichment.item.itemId)
+                  || (candidate.itemUrl && candidate.itemUrl === enrichment.item.itemUrl)
+                  ? enrichment.item
+                  : candidate
+              ));
+              if (enrichment.enriched) enrichedCount += 1;
+            }
+          } catch (_) {
+            // 商品详情结果仍然保留；店铺补充失败时提示用户用“当前店铺页”完整采集。
+          }
+        }
+        renderCurrentResultActions();
+        $('currentCollectHint').textContent = `当前详情页采集完成：${count} 条商品结果已暂存${enrichedCount ? `，已补充 ${enrichedCount} 个店铺基础资料` : ''}。请选择“加到数据中心商品表”或“导出当前详情页”；完整店铺评价请单独进入店铺页采集。`;
+        setStatus(`当前详情页采集完成：${count} 条结果已暂存${enrichedCount ? `，店铺资料已补充 ${enrichedCount} 个` : ''}，等待你选择加入总表或单独导出。`, 'success');
       }
       else if (selectedMode === 'api') setStatus('页面没有捕获到可识别的公开详情接口；可以切换页面详情模式重试。', 'error');
       else setStatus('当前页面暂未识别到商品，请等待加载或滚动后重试。', 'error');
@@ -558,14 +628,18 @@
       if (!page?.ok || page.pageType !== 'account') {
         throw new Error('当前不是闲鱼店铺/账号页，请先打开卖家账号页。');
       }
-      const result = await sendToTabWithRecovery(activeTab.id, { type: 'COLLECT_CURRENT_STORE_PAGE' });
+      const result = await sendToTabWithRecovery(activeTab.id, {
+        type: 'COLLECT_CURRENT_STORE_PAGE',
+        persistToDataCenter: false
+      });
       if (!result?.ok) throw new Error(result?.error || '店铺页采集失败');
-      await refreshCount();
+      pendingCurrentStoreProfile = result.profile || null;
+      pendingCurrentStoreSourceUrl = activeTab.url || '';
+      currentStoreCommitted = false;
       const reviewCount = Number(result.reviewCount || result.reviewCountLoaded || result.reviews?.length || 0);
-      storeDataReady = true;
-      $('storeExportButton').disabled = false;
-      setStatus(`${hadHistory ? '当前店铺页历史记录已更新' : '当前店铺页首次采集完成'}：保存 1 份店铺资料，读取 ${reviewCount} 条公开评价；评价图片会随 Excel 一起下载。`, 'success');
-      $('storeCollectHint').textContent = `${hadHistory ? '历史数据已更新' : '本地没有历史记录，已新建记录'}：本次读取 ${reviewCount} 条评价。现在可以直接点击“立即下载 Excel”，不需要再去数据中心。`;
+      renderStoreStatus('account', currentStoreStatus);
+      setStatus(`${hadHistory ? '当前店铺页重新采集完成' : '当前店铺页首次采集完成'}：本次暂存 1 份店铺资料，读取 ${reviewCount} 条公开评价；现在可以直接下载或加入店铺表。`, 'success');
+      $('storeCollectHint').textContent = `本次已读取 ${reviewCount} 条评价，结果已暂存。可以直接点击“立即下载 Excel”，也可以点击“加到数据中心店铺表”；不需要先去数据中心。`;
     } catch (error) {
       setStatus(error.message || '店铺页采集失败，请刷新账号页后重试。', 'error');
       $('storeCollectHint').textContent = '如果评价区仍在加载，请停留几秒后重试。';
@@ -573,6 +647,30 @@
       button.disabled = false;
       button.textContent = '采集当前店铺页';
       await refreshCurrentPage().catch(() => {});
+    }
+  }
+
+  async function commitCurrentStore() {
+    if (!pendingCurrentStoreProfile) {
+      setStatus('当前没有可加入数据中心的店铺采集结果。', 'error');
+      return;
+    }
+    const button = $('storeCommitButton');
+    if (button) button.disabled = true;
+    try {
+      const response = await sendRuntime({
+        type: 'COMMIT_STORE_PROFILE',
+        profile: pendingCurrentStoreProfile,
+        sourcePage: pendingCurrentStoreSourceUrl
+      });
+      if (!response?.ok) throw new Error(response?.error || '加入数据中心店铺表失败');
+      currentStoreCommitted = true;
+      await Promise.all([refreshCount(), refreshCurrentPage()]);
+      setStatus(`已将当前店铺加入数据中心店铺表；本次包含 ${response.reviewCount || pendingCurrentStoreProfile.reviews?.length || 0} 条评价。`, 'success');
+      $('storeCollectHint').textContent = '本次店铺资料、评价和评价图片已经加入数据中心店铺表；仍可以直接下载本次结果。';
+    } catch (error) {
+      if (button) button.disabled = false;
+      setStatus(error.message || '加入数据中心店铺表失败。', 'error');
     }
   }
 
@@ -752,8 +850,9 @@
   }
 
   async function exportItems(button = $('exportButton')) {
-    const isStoreExport = button.id === 'storeExportButton';
-    const idleLabel = isStoreExport ? '立即下载 Excel' : '下载 Excel';
+    const isCurrentStoreExport = button.id === 'storeExportButton';
+    const isStoreExport = isCurrentStoreExport || button.id === 'storeDataExportButton';
+    const idleLabel = isCurrentStoreExport ? '立即下载 Excel' : button.id === 'storeDataExportButton' ? '下载店铺表 Excel' : '下载商品表 Excel';
     button.disabled = true;
     button.textContent = '正在生成 Excel…';
     setStatus('正在下载图片并生成包含真实图片的 Excel…');
@@ -762,7 +861,10 @@
         type: 'EXPORT_ITEMS',
         mode: selectedMode,
         taskType: isStoreExport ? 'store' : 'data',
-        sellerUrl: isStoreExport ? (activeTab?.url || '') : undefined
+        sellerUrl: isCurrentStoreExport ? (activeTab?.url || '') : undefined,
+        storeProfiles: isCurrentStoreExport && pendingCurrentStoreProfile
+          ? [pendingCurrentStoreProfile]
+          : undefined
       });
       if (!response?.ok) throw new Error(response?.error || '导出失败');
       const result = response.result || {};
@@ -776,7 +878,11 @@
     } catch (error) {
       setStatus(error.message || '导出失败，请稍后重试。', 'error');
     } finally {
-      button.disabled = isStoreExport ? (currentPageType !== 'account' || !currentStoreStatus.exists) : false;
+      button.disabled = isCurrentStoreExport
+        ? (currentPageType !== 'account' || !hasCurrentStoreData())
+        : button.id === 'storeDataExportButton'
+          ? !storeDataReady
+          : false;
       button.textContent = idleLabel;
     }
   }
@@ -971,17 +1077,24 @@
     $('currentCommitButton').addEventListener('click', () => commitCurrentItems());
     $('currentExportButton').addEventListener('click', () => exportCurrentItems());
     $('storeCollectButton').addEventListener('click', () => collectCurrentStorePage());
+    $('storeCommitButton').addEventListener('click', () => commitCurrentStore());
     $('storeExportButton').addEventListener('click', () => exportItems($('storeExportButton')).catch(error => setStatus(error.message, 'error')));
-    $('storeDataButton').addEventListener('click', () => showScreen('data'));
+    $('storeDataButton').addEventListener('click', () => { setDataTab('stores'); showScreen('data'); });
     $('diagnosticButton').addEventListener('click', () => exportDiagnosticPackage());
     $('batchLinkButton').addEventListener('click', () => startLinkBatch());
     $('searchCrawlButton').addEventListener('click', () => startSearchCrawl());
     $('stopJobButton').addEventListener('click', () => stopJob());
     $('exportButton').addEventListener('click', () => exportItems($('exportButton')).catch(error => setStatus(error.message, 'error')));
+    $('storeDataExportButton').addEventListener('click', () => exportItems($('storeDataExportButton')).catch(error => setStatus(error.message, 'error')));
     $('taskExportButton').addEventListener('click', () => exportTaskResult().catch(error => setStatus(error.message, 'error')));
     $('taskCommitButton').addEventListener('click', () => commitTaskResult().catch(error => setStatus(error.message, 'error')));
-    $('taskDataButton').addEventListener('click', () => showScreen('data'));
+    $('taskDataButton').addEventListener('click', () => { setDataTab('products'); showScreen('data'); });
     $('clearButton').addEventListener('click', () => clearItems().catch(error => setStatus(error.message, 'error')));
+    $('dataProductsTab').addEventListener('click', () => setDataTab('products'));
+    $('dataStoresTab').addEventListener('click', () => setDataTab('stores'));
+    document.querySelectorAll('[data-open-data-tab]').forEach(button => {
+      button.addEventListener('click', () => setDataTab(button.dataset.openDataTab));
+    });
     $('saveSettingsButton').addEventListener('click', () => saveSettings().catch(error => setStatus(error.message, 'error')));
     $('linkInput').addEventListener('input', () => {
       const links = parseProductLinks($('linkInput').value);

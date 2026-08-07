@@ -183,7 +183,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .data-hero-line { display: flex; align-items: baseline; gap: 9px; margin-top: 5px; }
 .data-hero-line strong { color: var(--blue); font-size: 41px; line-height: 1; letter-spacing: -.07em; }
 .data-hero-line span { color: var(--ink); font-size: 16px; font-weight: 700; }
+.data-hero-line i { color: var(--muted); font-size: 18px; font-style: normal; }
 .data-hero p { max-width: 440px; margin: 10px 0 0; color: var(--muted-strong); font-size: 11px; line-height: 1.6; }
+.data-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 12px; border-radius: 13px; background: #eaf0ff; }
+.data-tab { min-height: 39px; padding: 7px 10px; border: 0; border-radius: 10px; color: var(--muted-strong); background: transparent; cursor: pointer; font-size: 12px; font-weight: 750; }
+.data-tab span { display: inline-grid; min-width: 20px; place-items: center; padding: 1px 5px; margin-left: 3px; border-radius: 999px; color: var(--blue); background: rgba(255, 255, 255, .64); font-size: 10px; }
+.data-tab.is-selected { color: var(--blue); background: #fff; box-shadow: 0 3px 10px rgba(50, 77, 173, .13); }
+.data-panel { display: block; }
 .data-summary-card { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 13px; }
 .data-summary-card div { display: grid; gap: 5px; min-width: 0; }
 .data-summary-card span { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
@@ -191,6 +197,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .data-summary-card strong.accent-text { color: var(--teal); }
 .data-actions-card { display: grid; gap: 9px; }
 .data-actions-card .helper { margin-top: 1px; }
+.data-clear-card { margin-top: 13px; }
 
 .history-list { display: grid; gap: 10px; margin-top: 15px; }
 .history-item { display: grid; gap: 9px; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); box-shadow: var(--shadow-soft); }

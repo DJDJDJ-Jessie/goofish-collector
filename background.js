@@ -1911,7 +1911,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           : taskType === 'store'
             ? []
             : await readItems();
-        let storeProfiles = taskType === 'store' ? await readStoreProfiles() : [];
+        let storeProfiles = taskType === 'store'
+          ? (Array.isArray(message.storeProfiles)
+            ? message.storeProfiles.map(profile => sanitizeStoreProfile(profile)).filter(Boolean)
+            : await readStoreProfiles())
+          : [];
         if (taskType === 'store' && message.sellerUrl) {
           const key = sellerProfileKey(message.sellerUrl);
           if (key) storeProfiles = storeProfiles.filter(profile => sellerProfileKey(profile.sellerUrl) === key);

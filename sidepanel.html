@@ -83,9 +83,14 @@
 
             <section class="menu-card">
               <h2>数据中心</h2>
-              <button class="menu-row" type="button" data-open-screen="data">
+              <button class="menu-row" type="button" data-open-screen="data" data-open-data-tab="products">
                 <span class="row-icon ink">▦</span>
-                <span class="row-copy"><strong>已采集数据</strong><small><span id="homeItemCount">0</span> 条商品记录，支持导出 Excel</small></span>
+                <span class="row-copy"><strong>商品表</strong><small><span id="homeItemCount">0</span> 条商品记录，支持独立导出 Excel</small></span>
+                <span class="row-chevron">›</span>
+              </button>
+              <button class="menu-row" type="button" data-open-screen="data" data-open-data-tab="stores">
+                <span class="row-icon orange">◎</span>
+                <span class="row-copy"><strong>店铺表</strong><small><span id="homeStoreCount">0</span> 个店铺，含店铺评价和评价图片</small></span>
                 <span class="row-chevron">›</span>
               </button>
               <button class="menu-row" type="button" data-open-screen="history">
@@ -134,7 +139,7 @@
           <section class="page-intro">
             <span class="intro-label">CURRENT DETAIL</span>
             <h2>采集当前商品详情</h2>
-            <p>商品主表只以当前详情页为准；店铺简介、开店时长和公开评价请在“采集当前店铺页”单独补充。</p>
+            <p>读取当前商品详情，并自动补充卖家店铺的基础公开资料；完整店铺评价和评价图片仍通过“采集当前店铺页”单独获取。</p>
           </section>
 
           <section class="context-card detail-context-card" aria-live="polite">
@@ -177,9 +182,10 @@
 
           <section class="action-card">
             <button id="storeCollectButton" class="button primary large" type="button">采集当前店铺页</button>
+            <button id="storeCommitButton" class="button teal-action large" type="button" disabled>加到数据中心店铺表</button>
             <button id="storeExportButton" class="button teal-action large" type="button" disabled>立即下载 Excel</button>
-            <button id="storeDataButton" class="button outline-action" type="button">查看数据中心</button>
-            <p id="storeCollectHint" class="helper">采集会在当前标签页内滚动评价区域；期间请不要切换到其它页面。</p>
+            <button id="storeDataButton" class="button outline-action" type="button">查看数据中心店铺表</button>
+            <p id="storeCollectHint" class="helper">采集会在当前标签页内滚动评价区域；结果会先暂存，你可以直接下载，也可以加入数据中心店铺表。</p>
           </section>
         </section>
 
@@ -221,19 +227,38 @@ https://www.goofish.com/item?id=…"></textarea>
         <section id="screen-data" class="screen" data-screen="data" aria-labelledby="screenTitle">
           <section class="data-hero">
             <span class="intro-label">LOCAL DATASET</span>
-            <div class="data-hero-line"><strong id="dataNumber">0</strong><span>条商品记录</span></div>
-            <p>数据保存在本机浏览器中，导出时会把图片下载并嵌入 Excel。</p>
+            <div class="data-hero-line"><strong id="dataNumber">0</strong><span>条商品</span><i>·</i><strong id="dataStoreNumber">0</strong><span>个店铺</span></div>
+            <p>商品表和店铺表分开保存、分开下载；导出时会把真实图片嵌入 Excel。</p>
           </section>
-          <section class="data-summary-card">
-            <div><span>当前商品主表</span><strong id="itemCount">0</strong></div>
-            <div><span>店铺资料</span><strong id="storeCount">0</strong></div>
-            <div><span>图片处理</span><strong class="accent-text">真实图片</strong></div>
-            <div><span>附加表</span><strong>图片、店铺、评价</strong></div>
+          <div class="data-tabs" role="tablist" aria-label="数据表类型">
+            <button id="dataProductsTab" class="data-tab is-selected" type="button" role="tab" aria-selected="true">商品表 <span id="dataProductsCount">0</span></button>
+            <button id="dataStoresTab" class="data-tab" type="button" role="tab" aria-selected="false">店铺表 <span id="dataStoresCount">0</span></button>
+          </div>
+          <section id="dataProductsPanel" class="data-panel" role="tabpanel">
+            <section class="data-summary-card">
+              <div><span>商品主表</span><strong id="itemCount">0</strong></div>
+              <div><span>图片索引</span><strong class="accent-text">逐张嵌入</strong></div>
+              <div><span>店铺资料</span><strong>商品表不混入</strong></div>
+            </section>
+            <section class="action-card data-actions-card">
+              <button id="exportButton" class="button primary large" type="button">下载商品表 Excel</button>
+              <p class="helper">包含商品详情、主图和全部商品图片索引；店铺评价请切换到店铺表。</p>
+            </section>
           </section>
-          <section class="action-card data-actions-card">
-            <button id="exportButton" class="button primary large" type="button">下载 Excel</button>
+          <section id="dataStoresPanel" class="data-panel is-hidden" role="tabpanel">
+            <section class="data-summary-card">
+              <div><span>店铺资料</span><strong id="storeCount">0</strong></div>
+              <div><span>评价数据</span><strong>完整独立保存</strong></div>
+              <div><span>评价图片</span><strong class="accent-text">逐张嵌入</strong></div>
+            </section>
+            <section class="action-card data-actions-card">
+              <button id="storeDataExportButton" class="button teal-action large" type="button" disabled>下载店铺表 Excel</button>
+              <p class="helper">包含店铺资料、全部已读取评价和评价图片；不会带入商品链接表。</p>
+            </section>
+          </section>
+          <section class="action-card data-actions-card data-clear-card">
             <button id="clearButton" class="button danger-outline" type="button">清空当前数据</button>
-            <p id="exportHint" class="helper">商品主表、图片索引、店铺资料、店铺评价和评价图片会一起写入工作簿；下载文件夹由设置决定。</p>
+            <p id="exportHint" class="helper">清空会同时清空本地商品表和店铺表，但不会删除采集历史。</p>
           </section>
         </section>
 
