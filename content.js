@@ -843,6 +843,8 @@
         if (/^(?:粉丝|关注|卖出|出售)\s*\d+|^\d+\s*(?:粉丝|关注|件?宝贝)$/.test(value)) continue;
         if (/(?:来闲鱼|开店|入驻|经营|好评率)/.test(value) && value.length < 120) continue;
         const className = oneLine(node.getAttribute?.('class') || '', 200);
+        if (/(?:infoTop|infoCenter|operate|tab|filter)/i.test(className)) continue;
+        if (/(?:粉丝|关注|卖出|出售)\s*\d+/.test(value) && value.length < 180) continue;
         const score = (infoScope ? 10 : 0)
           + (/bottom|intro|description/i.test(className) ? 4 : 0)
           + (node.parentElement === scope ? 2 : 0);

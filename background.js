@@ -673,6 +673,7 @@ function runExport(items, settings, context = {}) {
       target: 'offscreen',
       items: Array.isArray(items) ? items : [],
       storeProfiles: Array.isArray(context.storeProfiles) ? context.storeProfiles : [],
+      exportKind: exportType === 'store' ? 'store' : 'product',
       settings: normalizeSettings(settings),
       filename
     });

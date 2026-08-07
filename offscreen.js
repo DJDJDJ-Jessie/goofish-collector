@@ -217,7 +217,9 @@
     const items = Array.isArray(message.items) ? message.items : [];
     const storeProfiles = Array.isArray(message.storeProfiles) ? message.storeProfiles : [];
     const prepared = await prepareImageAssets(items, message.settings || {}, storeProfiles);
-    const blob = window.XianyuXlsx.createWorkbook(items, prepared.assets, storeProfiles);
+    const blob = window.XianyuXlsx.createWorkbook(items, prepared.assets, storeProfiles, {
+      kind: message.exportKind || 'product'
+    });
     const url = URL.createObjectURL(blob);
     const embedded = prepared.assets.filter(asset => asset.bytes?.length).length;
     const failed = prepared.assets.length - embedded;

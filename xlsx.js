@@ -336,7 +336,8 @@
     return `${XML_HEADER}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${DRAWING_REL_TYPE}" Target="../drawings/${xmlEscape(drawingFileName)}"/></Relationships>`;
   }
 
-  function workbookFiles(items, imageAssets, storeProfiles) {
+  function workbookFiles(items, imageAssets, storeProfiles, options = {}) {
+    const storeOnly = options.kind === 'store';
     const safeItems = Array.isArray(items) ? items : [];
     const safeProfiles = (Array.isArray(storeProfiles) ? storeProfiles : []).map(normalizeStoreProfile);
     const media = assignMediaAssets(imageAssets);
@@ -480,15 +481,77 @@
       drawingEntries.push(entry);
       return entry;
     }
-    const mainDrawing = addDrawing(1, mainPlacements);
-    const imageDrawing = addDrawing(2, imagePlacements);
-    const reviewImageDrawing = addDrawing(5, reviewImagePlacements);
+    const mainDrawing = storeOnly ? null : addDrawing(1, mainPlacements);
+    const imageDrawing = storeOnly ? null : addDrawing(2, imagePlacements);
+    const reviewImageDrawing = addDrawing(storeOnly ? 3 : 5, reviewImagePlacements);
     const imageDefaults = [...new Set(media.mediaFiles.map(file => file.extension))]
       .map(extension => `<Default Extension="${extension}" ContentType="${contentTypeForExtension(extension)}"/>`)
       .join('');
     const drawingOverrides = drawingEntries
       .map(entry => `<Override PartName="/xl/drawings/${entry.fileName}" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>`)
       .join('');
+
+    const sheetNumbers = storeOnly ? [1, 2, 3, 4] : [1, 2, 3, 4, 5, 6];
+    const workbookSheets = storeOnly
+      ? '<sheet name="店铺资料" sheetId="1" r:id="rId1"/><sheet name="店铺评价" sheetId="2" r:id="rId2"/><sheet name="评价图片" sheetId="3" r:id="rId3"/><sheet name="说明" sheetId="4" r:id="rId4"/>'
+      : '<sheet name="商品数据" sheetId="1" r:id="rId1"/><sheet name="图片索引" sheetId="2" r:id="rId2"/><sheet name="店铺资料" sheetId="3" r:id="rId3"/><sheet name="店铺评价" sheetId="4" r:id="rId4"/><sheet name="评价图片" sheetId="5" r:id="rId5"/><sheet name="说明" sheetId="6" r:id="rId6"/>';
+    const worksheetFiles = storeOnly
+      ? [
+        {
+          name: 'xl/worksheets/sheet1.xml',
+          data: sheetXml(storeHeaders, storeRows, [22, 44, 14, 12, 12, 14, 48, 14, 18, 14, 22, 44, 14])
+        },
+        {
+          name: 'xl/worksheets/sheet2.xml',
+          data: sheetXml(reviewHeaders, reviewRows, [22, 44, 10, 18, 12, 80, 32, 12, 56, 22])
+        },
+        {
+          name: 'xl/worksheets/sheet3.xml',
+          data: sheetXml(reviewImageHeaders, reviewImageRows, [22, 44, 10, 10, 24, 56, 24, 60, 22], {
+            rowHeights: reviewImageRowHeights,
+            drawingRelId: reviewImageDrawing ? 'rId1' : ''
+          })
+        },
+        {
+          name: 'xl/worksheets/sheet4.xml',
+          data: sheetXml(notes[0], notes.slice(1), [18, 110])
+        }
+      ]
+      : [
+        {
+          name: 'xl/worksheets/sheet1.xml',
+          data: sheetXml(mainHeaders, mainRows, [18, 44, 48, 20, 64, 12, 22, 22, 44, 14, 12, 12, 14, 42, 14, 18, 14, 22], {
+            rowHeights: mainRowHeights,
+            drawingRelId: mainDrawing ? 'rId1' : ''
+          })
+        },
+        {
+          name: 'xl/worksheets/sheet2.xml',
+          data: sheetXml(imageHeaders, imageRows, [18, 32, 10, 24, 54, 24, 44, 22, 60], {
+            rowHeights: imageRowHeights,
+            drawingRelId: imageDrawing ? 'rId1' : ''
+          })
+        },
+        {
+          name: 'xl/worksheets/sheet3.xml',
+          data: sheetXml(storeHeaders, storeRows, [22, 44, 14, 12, 12, 14, 48, 14, 18, 14, 22, 44, 14])
+        },
+        {
+          name: 'xl/worksheets/sheet4.xml',
+          data: sheetXml(reviewHeaders, reviewRows, [22, 44, 10, 18, 12, 80, 32, 12, 56, 22])
+        },
+        {
+          name: 'xl/worksheets/sheet5.xml',
+          data: sheetXml(reviewImageHeaders, reviewImageRows, [22, 44, 10, 10, 24, 56, 24, 60, 22], {
+            rowHeights: reviewImageRowHeights,
+            drawingRelId: reviewImageDrawing ? 'rId1' : ''
+          })
+        },
+        {
+          name: 'xl/worksheets/sheet6.xml',
+          data: sheetXml(notes[0], notes.slice(1), [18, 110])
+        }
+      ];
 
     const files = [
       {
@@ -498,7 +561,7 @@
   <Default Extension="xml" ContentType="application/xml"/>
   ${imageDefaults}
   <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  ${[1, 2, 3, 4, 5, 6].map(number => `<Override PartName="/xl/worksheets/sheet${number}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('\n  ')}
+  ${sheetNumbers.map(number => `<Override PartName="/xl/worksheets/sheet${number}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('\n  ')}
   <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
   <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
   <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
@@ -523,49 +586,17 @@
       },
       {
         name: 'xl/workbook.xml',
-        data: `${XML_HEADER}<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="商品数据" sheetId="1" r:id="rId1"/><sheet name="图片索引" sheetId="2" r:id="rId2"/><sheet name="店铺资料" sheetId="3" r:id="rId3"/><sheet name="店铺评价" sheetId="4" r:id="rId4"/><sheet name="评价图片" sheetId="5" r:id="rId5"/><sheet name="说明" sheetId="6" r:id="rId6"/></sheets></workbook>`
+        data: `${XML_HEADER}<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${workbookSheets}</sheets></workbook>`
       },
       {
         name: 'xl/_rels/workbook.xml.rels',
-        data: `${XML_HEADER}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${[1, 2, 3, 4, 5, 6].map(number => `<Relationship Id="rId${number}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${number}.xml"/>`).join('')}<Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`
+        data: `${XML_HEADER}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheetNumbers.map(number => `<Relationship Id="rId${number}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${number}.xml"/>`).join('')}<Relationship Id="rId${sheetNumbers.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`
       },
       {
         name: 'xl/styles.xml',
         data: `${XML_HEADER}<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="10"/><color theme="1"/><name val="Calibri"/></font><font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE54841"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="0" fontId="1" fillId="2" borderId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`
       },
-      {
-        name: 'xl/worksheets/sheet1.xml',
-        data: sheetXml(mainHeaders, mainRows, [18, 44, 48, 20, 64, 12, 22, 22, 44, 14, 12, 12, 14, 42, 14, 18, 14, 22], {
-          rowHeights: mainRowHeights,
-          drawingRelId: mainDrawing ? 'rId1' : ''
-        })
-      },
-      {
-        name: 'xl/worksheets/sheet2.xml',
-        data: sheetXml(imageHeaders, imageRows, [18, 32, 10, 24, 54, 24, 44, 22, 60], {
-          rowHeights: imageRowHeights,
-          drawingRelId: imageDrawing ? 'rId1' : ''
-        })
-      },
-      {
-        name: 'xl/worksheets/sheet3.xml',
-        data: sheetXml(storeHeaders, storeRows, [22, 44, 14, 12, 12, 14, 48, 14, 18, 14, 22, 44, 14])
-      },
-      {
-        name: 'xl/worksheets/sheet4.xml',
-        data: sheetXml(reviewHeaders, reviewRows, [22, 44, 10, 18, 12, 80, 32, 12, 56, 22])
-      },
-      {
-        name: 'xl/worksheets/sheet5.xml',
-        data: sheetXml(reviewImageHeaders, reviewImageRows, [22, 44, 10, 10, 24, 56, 24, 60, 22], {
-          rowHeights: reviewImageRowHeights,
-          drawingRelId: reviewImageDrawing ? 'rId1' : ''
-        })
-      },
-      {
-        name: 'xl/worksheets/sheet6.xml',
-        data: sheetXml(notes[0], notes.slice(1), [18, 110])
-      }
+      ...worksheetFiles
     ];
 
     for (const entry of drawingEntries) {
@@ -580,9 +611,9 @@
     return files;
   }
 
-  function createWorkbook(items, imageAssets = [], storeProfiles = []) {
+  function createWorkbook(items, imageAssets = [], storeProfiles = [], options = {}) {
     const safeItems = Array.isArray(items) ? items.slice(0, 2000) : [];
-    const bytes = zipStore(workbookFiles(safeItems, imageAssets, storeProfiles));
+    const bytes = zipStore(workbookFiles(safeItems, imageAssets, storeProfiles, options));
     return new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   }
 
