@@ -1796,7 +1796,9 @@
           ...result,
           pageType: pageType(),
           pageItems: pageItems.size,
-          items: found
+          // 后台已经按当前详情页身份过滤过一次；优先返回过滤后的结果，
+          // 避免把网络/DOM 扫描中的推荐商品带到当前详情页的单独导出里。
+          items: Array.isArray(result?.items) ? result.items : found
         });
       }).catch(error => sendResponse({
         ok: false,
@@ -1843,7 +1845,8 @@
             mode: 'api',
             pageItems: pageItems.size,
             buffered: found.length,
-            items: found
+            // 与页面详情模式保持一致：单页导出只使用后台确认属于当前详情页的记录。
+            items: Array.isArray(result?.items) ? result.items : found
           });
         } catch (error) {
           // 任何 DOM/API 解析异常都必须结束这次消息；否则后台会一直等待，
