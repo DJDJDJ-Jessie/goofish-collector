@@ -1,6 +1,6 @@
 # 闲鱼公开商品研究采集器｜开发文档
 
-版本：0.5.5
+版本：0.5.6
 日期：2026-08-07  
 实现基线：Chrome Manifest V3
 
@@ -71,7 +71,7 @@ Service Worker（任务编排、存储、通知、下载调度）
 - 店铺页采集会轮询/读取稳定的账号资料；商品任务会在 `account-page` 阶段自动进入卖家账号页，读取稳定的基础资料后合并回 `stagedItems`；该阶段不写入全局店铺表，也不把未完整加载的评价冒充店铺任务结果。只有 `COLLECT_CURRENT_STORE_PAGE` 的明确提交才写入店铺资料/评价存储。
 - 店铺简介按语义节点保留原文，纯数字是允许的用户自定义简介；数字格式只用于明确的数量、百分比和时长字段，不作为简介过滤条件。
 - `GO_NEXT_PAGE` 优先识别闲鱼 `search-page-tiny-container` 分页器的当前页码并点击下一页码；若只有无文字右箭头，则点击右箭头；最后才兼容带“下一页”文字的旧版本控件。
-- 商品记录只通过 `COLLECT_ITEMS` 发给 service worker；消息携带 `persistToDataCenter`，批量任务和当前详情默认传 `false`，后台将结果写入任务暂存区或返回侧边栏临时结果。当前详情的店铺补采集由 `ENRICH_SINGLE_ITEM` 复用原标签页；批量/搜索由 `account-page` 状态机完成。
+- 商品记录只通过 `COLLECT_ITEMS` 发给 service worker；消息携带 `persistToDataCenter`，批量任务和当前详情默认传 `false`，后台将结果写入任务暂存区或返回侧边栏临时结果。当前详情的店铺补采集由 `ENRICH_SINGLE_ITEM` 复用原标签页；批量/搜索由 `account-page` 状态机完成。若详情结果没有 `sellerUrl`，后台会通过 `GET_SELLER_ENTRY` 从当前详情页卖家昵称的父级个人页链接重新发现，再进入账号页。
 - 店铺资料通过 `COLLECT_STORE_PROFILE` 发给 service worker；搜索列表阶段不会通过 `COLLECT_ITEMS` 写入商品主表。
 - 详情页类目解析优先调用 `serviceTypeFromRoot`，在详情属性行或短语义节点中读取“服务类型”值，并兼容标签和值被拆成多个节点；没有公开服务类型时才使用可见面包屑，平台内部 URL `categoryId` 不直接导出为类目。
 - 开店时长解析只接受“来闲鱼/开店/入驻/经营”标签与时长值直接相邻的匹配；不会用任意 24 个字符范围的正则把“1天前来过”误识别成“开店 1 天”。
@@ -158,6 +158,7 @@ idle
 | `COLLECT_STORE_PROFILE` | 保存店铺公开资料、评价和评价图片索引 |
 | `COMMIT_STORE_PROFILE` | 把当前店铺页暂存结果加入数据中心店铺表 |
 | `ENRICH_SINGLE_ITEM` | 当前详情页复用原标签页访问卖家账号页，返回补齐后的商品结果 |
+| `GET_SELLER_ENTRY` | 从当前商品详情页卖家昵称及其父级个人页链接发现卖家账号页 |
 
 ### Service Worker → Content
 
