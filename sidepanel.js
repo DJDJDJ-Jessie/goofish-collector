@@ -800,7 +800,7 @@
     } catch (error) {
       setStatus(error.message || '本次任务导出失败。', 'error');
     } finally {
-      button.disabled = !job.stagedItems?.length;
+      button.disabled = !(job.stagedItems?.length || job.collected);
       button.textContent = '导出本次商品数据';
     }
   }

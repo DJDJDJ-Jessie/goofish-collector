@@ -778,6 +778,7 @@
       '[class^="infoCenterText--"]', '[class*=" infoCenterText--"]',
       '[class^="bottom--"]', '[class*=" bottom--"]',
       '[class^="intro--"]', '[class*=" intro--"]',
+      '[class^="description--"]', '[class*=" description--"]',
       '[data-testid*="intro"]', '[data-testid*="description"]'
     ].join(', ');
 
