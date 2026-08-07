@@ -1,6 +1,6 @@
 # 闲鱼公开商品研究采集器｜开发文档
 
-版本：0.5.3
+版本：0.5.4
 日期：2026-08-07  
 实现基线：Chrome Manifest V3
 
@@ -42,17 +42,19 @@ Service Worker（任务编排、存储、通知、下载调度）
 - 通过 `chrome.alarms` 驱动任务阶段，避免依赖某个页面脚本的长时间 Promise。
 - 合并、清洗、去重商品记录，写入 `xianyu_public_items_v1`。
 - 合并、清洗店铺资料和公开评价，写入 `xianyu_public_store_profiles_v1`；店铺评价保留评价图片 URL，导出阶段下载真实图片。
+- 商品任务结果写入活动任务的 `stagedItems` 暂存区，不直接写入 `xianyu_public_items_v1`；只有 `COMMIT_ITEMS` 或 `COMMIT_JOB_RESULT` 才合并到数据中心商品总表。
 - 维护任务历史 `xianyu_collect_history_v1`。
 - 任务终态时发送通知、更新 badge，并触发自动导出流程。
 - 所有 `tabs.sendMessage` 都有有限超时；页面没有响应时由阶段重试/失败逻辑接管，不能让 Service Worker 的任务 Promise 无限等待。
 - 读取活动任务状态时检查更新时间；`collecting`/`waiting-page` 超过 90 秒没有进展时写入失败结论并释放唯一活动任务锁，`ready-to-collect` 则重新安排一次闹钟，兼容扩展重载或 Service Worker 睡眠丢失 alarm 的情况。
 - 通过 `chrome.downloads` 发起最终文件下载；下载根目录由浏览器设置决定。
-- 导出时同时读取商品主表数据和店铺资料快照；历史任务保留店铺资料快照，便于重新导出。
+- 商品导出只接收商品结果和空的店铺资料集合；店铺导出只接收店铺资料/评价，生成独立的店铺工作簿，禁止通过 `readItems()` 把历史商品链接带入店铺文件。
 
 ### 3.2 侧边栏：`sidepanel.html/js/css`
 
 - 使用首页、详情页、店铺页、批量链接、搜索跨页、数据中心、历史、设置和处理任务页组成的轻量 screen router；一级功能页只保留一个明确的父级，避免返回按钮累积历史栈。
-- 店铺页采集成功后直接启用“立即下载 Excel”；店铺导出使用当前本地商品数据和店铺资料快照，不需要用户手动跳转到数据中心。
+- 店铺页采集成功后直接启用“立即下载 Excel”；店铺导出只使用当前账号对应的店铺资料和评价快照，不需要用户手动跳转到数据中心，也不包含商品工作表。
+- 当前详情页采集成功后启用“加到数据中心商品表”和“导出当前详情页”；批量/搜索任务完成后启用“加到数据中心商品表”和“导出本次商品数据”。
 - 只负责用户操作、状态轮询、下载按钮和历史查看，不负责跨页任务循环。
 - 所有任务按钮在调用前检查当前页面和任务状态。
 - 展示页面详情模式与接口观察模式的差异提示，保存模式选择、下载方式和导出设置。
@@ -66,12 +68,14 @@ Service Worker（任务编排、存储、通知、下载调度）
 - 接收 `COLLECT_CURRENT_PAGE`、`START_API_CAPTURE`、`GET_SEARCH_LINKS`、`GO_NEXT_PAGE` 等消息。
 - 接收 `COLLECT_CURRENT_STORE_PAGE`，自动激活评价区域、滚动懒加载评价，并返回店铺资料与逐条评价图片。
 - 账号页解析先从 `infoTop--*` 向上定位同时包含账号统计和简介兄弟节点的最小资料作用域；不能把只含昵称的 `infoTop` 当成完整资料区。不再在整个 `body` 中用通用 `description` 或第一个 `.num--*` 猜字段。
-- 后台打开卖家账号页后，会轮询 `GET_ACCOUNT_PROFILE`，直到关键字段连续两次生成相同快照；未稳定的骨架屏/异步中间态不会覆盖已经采集到的商品详情字段。
+- 店铺页采集会轮询/读取稳定的账号资料；商品任务不再为了补店铺资料而自动打开卖家账号页，避免把商品任务和店铺评价任务混在同一个页面状态机中。
 - 店铺简介按语义节点保留原文，纯数字是允许的用户自定义简介；数字格式只用于明确的数量、百分比和时长字段，不作为简介过滤条件。
 - `GO_NEXT_PAGE` 优先识别闲鱼 `search-page-tiny-container` 分页器的当前页码并点击下一页码；若只有无文字右箭头，则点击右箭头；最后才兼容带“下一页”文字的旧版本控件。
-- 商品记录只通过 `COLLECT_ITEMS` 发给 service worker。
+- 商品记录只通过 `COLLECT_ITEMS` 发给 service worker；消息携带 `persistToDataCenter`，批量任务和当前详情默认传 `false`，后台将结果写入任务暂存区或返回侧边栏临时结果。
 - 店铺资料通过 `COLLECT_STORE_PROFILE` 发给 service worker；搜索列表阶段不会通过 `COLLECT_ITEMS` 写入商品主表。
-- 详情页类目解析优先调用 `serviceTypeFromRoot`，在详情属性行中读取“服务类型”值，并兼容标签被拆成多个字符节点；没有公开服务类型时才使用可见面包屑，平台内部 URL `categoryId` 不直接导出为类目。
+- 详情页类目解析优先调用 `serviceTypeFromRoot`，在详情属性行或短语义节点中读取“服务类型”值，并兼容标签和值被拆成多个节点；没有公开服务类型时才使用可见面包屑，平台内部 URL `categoryId` 不直接导出为类目。
+- 开店时长解析只接受“来闲鱼/开店/入驻/经营”标签与时长值直接相邻的匹配；不会用任意 24 个字符范围的正则把“1天前来过”误识别成“开店 1 天”。
+- 店铺简介只从账号资料作用域的 `bottom/intro/description` 语义节点读取；纯数字简介不被格式过滤，但粉丝、关注、卖出量、好评率、访问时间等统计节点会先排除。
 - DOM/API/二次扫描合并使用非空字段优先策略；类目使用语义值优先策略，内部 `类目ID` 不能覆盖可见服务类型，也不会在 DOM 明确没有名称时继续冒充类目。
 - `COLLECT_CURRENT_PAGE`、`START_API_CAPTURE`、店铺资料保存和商品数据保存都必须有异常回调；任何解析或运行时消息异常都要调用 `sendResponse`，避免后台误判为仍在处理中。
 
@@ -125,6 +129,7 @@ idle
   sellerProfiles, sellerFailures, collectSellerInfo,
   pendingItem, pendingSellerUrl, pendingSellerKey, pendingCount,
   targetCount, maxPages, visited, pagesProcessed, collected,
+  stagedItems, committedToDataCenter,
   failures, retries, delayMs, createdAt, updatedAt, message
 }
 ```
@@ -141,12 +146,14 @@ idle
 | `START_BATCH_LINKS` | 启动链接批量任务，携带 `links/mode` |
 | `START_SEARCH_CRAWL` | 启动搜索跨页任务，携带 `startUrl/targetCount/maxPages/mode` |
 | `STOP_JOB` | 停止活动任务 |
-| `EXPORT_ITEMS` | 按设置生成并下载 Excel |
+| `COMMIT_ITEMS` | 把当前详情页临时结果合并到数据中心商品表 |
+| `COMMIT_JOB_RESULT` | 把已完成批量/搜索任务的 `stagedItems` 合并到数据中心商品表 |
+| `EXPORT_ITEMS` | 按 `taskType` 导出商品、当前详情或当前店铺；商品与店铺数据不混用 |
+| `EXPORT_JOB_RESULT` | 导出当前任务暂存的商品结果，不读取历史商品集合 |
 | `GET_SETTINGS` / `SAVE_SETTINGS` | 读写下载和导出设置 |
 | `GET_HISTORY` / `DELETE_HISTORY` | 读写历史任务 |
 | `GET_PAGE_SNAPSHOT` | 导出当前实时 DOM、公开响应、页面资源索引和账号页字段解析快照 |
 | `GET_STORE_STATUS` | 按当前 `/personal?userId=...` 查询本地历史店铺资料、评价数量和最近采集时间 |
-| `ENRICH_SINGLE_ITEM` | 为单个详情记录读取对应卖家账号页的公开资料 |
 | `COLLECT_STORE_PROFILE` | 保存店铺公开资料、评价和评价图片索引 |
 
 ### Service Worker → Content
@@ -176,6 +183,7 @@ idle
     publishedAt, sourcePage, dataSource, collectedAt
   }],
   pageType: 'detail', sourcePage, reason
+  persistToDataCenter: false
 }
 ```
 
@@ -197,6 +205,8 @@ idle
 
 固定 18 列，顺序为：`商品ID、商品链接、主图文件名、商品图片（已嵌入）、商品文案、价格、类目、店铺名称、卖家账号页、卖家地区、粉丝数、关注数、卖家商品数、店铺简介、开店时长、商品好评率、店铺评价数、采集时间`。标题、来源页面、数据来源、图片状态等作为内部字段保留，不再进入主表。
 
+商品任务导出使用 `stagedItems` 或显式传入的临时商品集合；数据中心导出使用 `xianyu_public_items_v1`。两者只有在用户点击加入按钮后才合并。
+
 ### 图片索引表
 
 商品图片一张一行，字段包括：商品 ID、内部标题、图片序号、图片名称、嵌入状态、失败原因、原始图片 URL。店铺评价图片单独一张一行，放在“评价图片”工作表；图片对象分别由商品主表、图片索引、评价图片三个 drawing 承载。
@@ -206,12 +216,13 @@ idle
 - “店铺资料”保存店铺字段和“已采集评价数”。
 - “店铺评价”一行对应一条评价，保存评价人、身份、全文、时间/地区、图片数和图片文件名。
 - “评价图片”逐张嵌入真实图片，并保存失败时原始图片地址。
+- 店铺导出采用 `kind: 'store'` 的独立工作簿，只生成“店铺资料”“店铺评价”“评价图片”“说明”四张表；商品导出采用商品工作簿，不把店铺评价图片或历史店铺快照混入商品结果。
 
 ### 下载流程
 
 ```text
-读取商品数据
-   → 读取店铺资料与评价图片索引
+读取商品任务暂存结果或数据中心商品结果
+   → 商品导出读取商品图片索引；店铺导出读取当前店铺评价图片索引
    → 根据商品图片上限生成商品图片任务；评价图片单独按已加载评价全部生成任务
    → 并发下载并解码/转码
    → 生成 xlsx Blob
@@ -219,7 +230,7 @@ idle
    → 保存历史导出信息
 ```
 
-自动下载只在任务终态为 `completed` 且设置为 `auto` 时触发；没有成功进入任何详情页的搜索任务会是 `failed`，不会自动下载一份“完成 0 条”的文件。手动模式只保存结果并显示“下载 Excel”按钮。下载错误不会丢失已采集数据。
+自动下载只在商品任务终态为 `completed` 且设置为 `auto` 时触发，使用该任务的 `stagedItems`；没有成功进入任何详情页的搜索任务会是 `failed`，不会自动下载一份“完成 0 条”的文件。手动模式只保存任务结果并显示“导出本次商品数据”按钮。当前详情页和当前店铺页采集完成后分别显示自己的导出按钮。下载错误不会丢失已采集数据。
 
 ## 8. 设置模型
 
