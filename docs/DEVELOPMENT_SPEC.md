@@ -68,7 +68,7 @@ Service Worker（任务编排、存储、通知、下载调度）
 - 接收 `COLLECT_CURRENT_PAGE`、`START_API_CAPTURE`、`GET_SEARCH_LINKS`、`GO_NEXT_PAGE` 等消息。
 - 接收 `COLLECT_CURRENT_STORE_PAGE`，自动激活评价区域、滚动懒加载评价，并返回店铺资料与逐条评价图片。
 - 账号页解析先从 `infoTop--*` 向上定位同时包含账号统计和简介兄弟节点的最小资料作用域；不能把只含昵称的 `infoTop` 当成完整资料区。兼容 `bottom--*`、`intro--*`、`description--*` 和 `data-testid` 简介容器；不再在整个 `body` 中用通用 `description` 或第一个 `.num--*` 猜字段。
-- 店铺页采集会轮询/读取稳定的账号资料；商品任务会在 `account-page` 阶段自动进入卖家账号页，读取稳定的基础资料后合并回 `stagedItems`，该阶段只补商品行所需的店铺字段，不把未完整加载的评价冒充店铺任务结果。完整评价仍由 `COLLECT_CURRENT_STORE_PAGE` 负责。
+- 店铺页采集会轮询/读取稳定的账号资料；商品任务会在 `account-page` 阶段自动进入卖家账号页，读取稳定的基础资料后合并回 `stagedItems`；该阶段不写入全局店铺表，也不把未完整加载的评价冒充店铺任务结果。只有 `COLLECT_CURRENT_STORE_PAGE` 的明确提交才写入店铺资料/评价存储。
 - 店铺简介按语义节点保留原文，纯数字是允许的用户自定义简介；数字格式只用于明确的数量、百分比和时长字段，不作为简介过滤条件。
 - `GO_NEXT_PAGE` 优先识别闲鱼 `search-page-tiny-container` 分页器的当前页码并点击下一页码；若只有无文字右箭头，则点击右箭头；最后才兼容带“下一页”文字的旧版本控件。
 - 商品记录只通过 `COLLECT_ITEMS` 发给 service worker；消息携带 `persistToDataCenter`，批量任务和当前详情默认传 `false`，后台将结果写入任务暂存区或返回侧边栏临时结果。当前详情的店铺补采集由 `ENRICH_SINGLE_ITEM` 复用原标签页；批量/搜索由 `account-page` 状态机完成。

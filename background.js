@@ -1543,12 +1543,14 @@ async function finishPendingSellerStep(job, profile = null, errorMessage = '') {
 
   if (profile) {
     const key = job.pendingSellerKey || sellerProfileKey(job.pendingSellerUrl);
-    const storedProfile = await persistStoreProfile(profile, job.pendingSellerUrl || '');
+    // 商品任务只把账号页基础资料合并回商品暂存行；完整店铺资料/评价必须由
+    // “采集当前店铺页”明确提交，避免店铺表出现只读到首屏资料的半成品。
+    const productProfile = sanitizeStoreProfile(profile, job.pendingSellerUrl || '');
     const sellerProfiles = {
       ...(job.sellerProfiles || {}),
-      ...(key ? { [key]: storedProfile || profile } : {})
+      ...(key ? { [key]: productProfile || profile } : {})
     };
-    next = mergeStagedItemWithProfile(next, pending, storedProfile || profile);
+    next = mergeStagedItemWithProfile(next, pending, productProfile || profile);
     next = { ...next, sellerProfiles };
   }
 
@@ -1914,10 +1916,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           : await fetchSellerProfile(sellerUrl);
         // 商品任务只补基础店铺字段；完整评价和评价图片必须由“采集当前店铺页”加载，
         // 防止把账号页首屏的少量评价误报为完整店铺评价。
-        const profileForProduct = { ...profile, reviews: [] };
-        const storedProfile = await persistStoreProfile(profileForProduct, sellerUrl);
-        const enrichedItem = applyProfileToItem(item, storedProfile || profile);
-        return { ok: true, enriched: Boolean(enrichedItem), item: enrichedItem, profile: storedProfile || profile };
+        const profileForProduct = sanitizeStoreProfile({ ...profile, reviews: [] }, sellerUrl);
+        const enrichedItem = applyProfileToItem(item, profileForProduct || profile);
+        return { ok: true, enriched: Boolean(enrichedItem), item: enrichedItem, profile: profileForProduct || profile };
       }
 
       case 'GET_ITEMS':
