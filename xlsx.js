@@ -353,7 +353,7 @@
     }
 
     const mainHeaders = [
-      '商品ID', '商品链接', '主图文件名', '商品图片（已嵌入）', '商品文案', '价格', '类目', '店铺名称',
+      '商品ID', '商品链接', '主图文件名', '商品图片', '商品文案', '价格', '类目', '店铺名称',
       '卖家账号页', '卖家地区', '粉丝数', '关注数', '卖家商品数', '店铺简介', '开店时长', '商品好评率',
       '店铺评价数', '采集时间'
     ];
@@ -369,7 +369,7 @@
       const reviewCount = item.sellerReviewCount || (item.sellerReviewSummary.match(/\d+/)?.[0] || '');
       mainRows.push([
         item.itemId, item.itemUrl, statusFileName,
-        hasImage ? '已嵌入' : '未嵌入', item.description, item.price, item.category, item.sellerName,
+        '', item.description, item.price, item.category, item.sellerName,
         item.sellerUrl, item.sellerLocation, item.sellerFollowers, item.sellerFollowing, item.sellerProductCount,
         item.sellerIntro, item.storeDuration, item.itemGoodRate, reviewCount, item.collectedAt
       ]);
@@ -382,7 +382,7 @@
     });
 
     const imageHeaders = [
-      '商品ID', '商品标题（内部识别）', '图片序号', '图片（已嵌入）', '图片文件名', '图片下载状态',
+      '商品ID', '商品标题（内部识别）', '图片序号', '图片', '图片文件名', '图片状态',
       '商品链接', '采集时间', '失败时原始地址'
     ];
     const imageRows = [];
@@ -394,8 +394,8 @@
       const row = index + 1;
       imageRows.push([
         asset.itemId || '', asset.title || '', asset.imageIndex || index + 1,
-        embedded ? '已嵌入' : '未嵌入', asset.fileName || '',
-        embedded ? '已嵌入 Excel' : `下载失败：${asset.error || '未知错误'}`,
+        '', asset.fileName || '',
+        embedded ? '成功' : `下载失败：${asset.error || '未知错误'}`,
         asset.itemUrl || '', asset.collectedAt || '', embedded ? '' : (asset.url || '')
       ]);
       if (embedded) {
@@ -439,8 +439,8 @@
     }
 
     const reviewImageHeaders = [
-      '店铺名称', '卖家账号页', '评价序号', '图片序号', '评价图片（已嵌入）', '图片文件名',
-      '图片下载状态', '失败时原始地址', '采集时间'
+      '店铺名称', '卖家账号页', '评价序号', '图片序号', '评价图片', '图片文件名',
+      '图片状态', '失败时原始地址', '采集时间'
     ];
     const reviewImageRows = [];
     const reviewImagePlacements = [];
@@ -450,8 +450,8 @@
       const row = index + 1;
       reviewImageRows.push([
         asset.storeName || '', asset.sellerUrl || '', asset.reviewIndex || '', asset.imageIndex || index + 1,
-        embedded ? '已嵌入' : '未嵌入', asset.fileName || '',
-        embedded ? '已嵌入 Excel' : `下载失败：${asset.error || '未知错误'}`,
+        '', asset.fileName || '',
+        embedded ? '成功' : `下载失败：${asset.error || '未知错误'}`,
         embedded ? '' : (asset.url || ''), asset.collectedAt || ''
       ]);
       if (embedded) {
@@ -483,7 +483,7 @@
     }
     const mainDrawing = storeOnly ? null : addDrawing(1, mainPlacements);
     const imageDrawing = storeOnly ? null : addDrawing(2, imagePlacements);
-    const reviewImageDrawing = addDrawing(storeOnly ? 3 : 5, reviewImagePlacements);
+    const reviewImageDrawing = storeOnly ? addDrawing(3, reviewImagePlacements) : null;
     const imageDefaults = [...new Set(media.mediaFiles.map(file => file.extension))]
       .map(extension => `<Default Extension="${extension}" ContentType="${contentTypeForExtension(extension)}"/>`)
       .join('');
@@ -491,10 +491,10 @@
       .map(entry => `<Override PartName="/xl/drawings/${entry.fileName}" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>`)
       .join('');
 
-    const sheetNumbers = storeOnly ? [1, 2, 3, 4] : [1, 2, 3, 4, 5, 6];
+    const sheetNumbers = storeOnly ? [1, 2, 3, 4] : [1, 2, 3];
     const workbookSheets = storeOnly
       ? '<sheet name="店铺资料" sheetId="1" r:id="rId1"/><sheet name="店铺评价" sheetId="2" r:id="rId2"/><sheet name="评价图片" sheetId="3" r:id="rId3"/><sheet name="说明" sheetId="4" r:id="rId4"/>'
-      : '<sheet name="商品数据" sheetId="1" r:id="rId1"/><sheet name="图片索引" sheetId="2" r:id="rId2"/><sheet name="店铺资料" sheetId="3" r:id="rId3"/><sheet name="店铺评价" sheetId="4" r:id="rId4"/><sheet name="评价图片" sheetId="5" r:id="rId5"/><sheet name="说明" sheetId="6" r:id="rId6"/>';
+      : '<sheet name="商品数据" sheetId="1" r:id="rId1"/><sheet name="图片索引" sheetId="2" r:id="rId2"/><sheet name="说明" sheetId="3" r:id="rId3"/>';
     const worksheetFiles = storeOnly
       ? [
         {
@@ -534,21 +534,6 @@
         },
         {
           name: 'xl/worksheets/sheet3.xml',
-          data: sheetXml(storeHeaders, storeRows, [22, 44, 14, 12, 12, 14, 48, 14, 18, 14, 22, 44, 14])
-        },
-        {
-          name: 'xl/worksheets/sheet4.xml',
-          data: sheetXml(reviewHeaders, reviewRows, [22, 44, 10, 18, 12, 80, 32, 12, 56, 22])
-        },
-        {
-          name: 'xl/worksheets/sheet5.xml',
-          data: sheetXml(reviewImageHeaders, reviewImageRows, [22, 44, 10, 10, 24, 56, 24, 60, 22], {
-            rowHeights: reviewImageRowHeights,
-            drawingRelId: reviewImageDrawing ? 'rId1' : ''
-          })
-        },
-        {
-          name: 'xl/worksheets/sheet6.xml',
           data: sheetXml(notes[0], notes.slice(1), [18, 110])
         }
       ];
