@@ -922,7 +922,7 @@
       sellerFollowing: numberAfterLabel(followingText, /(\d+)\s*关注/) || countFromLabelLines(infoLines, '关注'),
       sellerProductCount: productCount || productHeaderValue,
       sellerIntro: intro,
-      storeDuration: durationFromRoot(profileRoot),
+      storeDuration: durationFromRoot(profileRoot) || durationFromRoot(root),
       sellerGoodRate: goodRateFromPage(profileRoot) || goodRateFromPage(root),
       sellerReviewSummary: reviewCountText,
       sellerReviewCount: reviewCount,
@@ -1536,7 +1536,7 @@
     return accountReviewsFromPage(document.body);
   }
 
-  async function collectStoreProfile() {
+  async function collectStoreProfile(persistToDataCenter = true) {
     if (pageType() !== 'account') {
       return { ok: false, pageType: pageType(), error: '当前不是卖家账号页，请先打开闲鱼店铺/账号页。' };
     }
@@ -1549,11 +1549,14 @@
       const saved = await sendRuntimeRequest({
         type: 'COLLECT_STORE_PROFILE',
         profile,
+        persistToDataCenter,
         sourcePage: location.href
       });
       return {
         ok: saved?.ok !== false,
         sellerName: profile.sellerName,
+        profile,
+        staged: saved?.staged === true,
         storeCount: saved?.storeCount || 0,
         reviewCount: saved?.reviewCount || profile.reviews.length,
         reviewCountLoaded: profile.reviews.length,
@@ -1914,7 +1917,7 @@
     }
 
     if (message?.type === 'COLLECT_CURRENT_STORE_PAGE') {
-      collectStoreProfile()
+      collectStoreProfile(message.persistToDataCenter !== false)
         .then(sendResponse)
         .catch(error => sendResponse({ ok: false, error: error?.message || String(error) }));
       return true;

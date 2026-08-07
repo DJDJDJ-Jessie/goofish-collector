@@ -218,6 +218,7 @@ function reviewIdentity(review) {
 function sanitizeReview(input) {
   if (!input || typeof input !== 'object') return null;
   const review = {
+    reviewIndex: Math.max(0, Number(input.reviewIndex) || 0),
     reviewer: cleanText(input.reviewer || input.userName || '', 160),
     role: cleanText(input.role || input.tag || '', 60),
     feedback: cleanText(input.feedback || input.content || input.text || '', 12000),
@@ -920,6 +921,58 @@ async function mergeStoredItemWithProfile(identity, profile) {
   return true;
 }
 
+function applyProfileToItem(item, profile) {
+  const base = sanitizeItem(item || {});
+  if (!base || !profile) return base;
+
+  const patch = { ...base };
+  for (const field of [
+    'sellerName', 'sellerUrl', 'sellerLocation', 'sellerFollowers', 'sellerFollowing',
+    'sellerProductCount', 'sellerIntro', 'storeDuration', 'sellerReviewSummary', 'sellerReviewCount'
+  ]) {
+    if (profile[field]) patch[field] = profile[field];
+  }
+
+  const profileGoodRate = rateText(profile.sellerGoodRate || profile.goodRate || '');
+  if (profileGoodRate && !rateText(patch.itemGoodRate || '')) {
+    patch.itemGoodRate = profileGoodRate;
+    if (!patch.reviewSummary || !rateText(patch.reviewSummary)) patch.reviewSummary = profileGoodRate;
+  }
+  if (Array.isArray(profile.reviewSamples) && profile.reviewSamples.length) {
+    patch.reviewSamples = profile.reviewSamples;
+  }
+  patch.dataSource = [base.dataSource, 'account-dom'].filter(Boolean).join(',');
+  return sanitizeItem(patch);
+}
+
+async function persistStoreProfile(profile, sourcePage = '') {
+  const clean = sanitizeStoreProfile(profile, sourcePage);
+  if (!clean) return null;
+  const profiles = mergeStoreProfiles(await readStoreProfiles(), [clean]);
+  await writeStoreProfiles(profiles);
+  return profiles.find(item => storeProfileIdentity(item) === storeProfileIdentity(clean)) || clean;
+}
+
+function mergeStagedItemWithProfile(job, item, profile) {
+  const enriched = applyProfileToItem(item, profile);
+  if (!enriched) return job;
+  return {
+    ...job,
+    stagedItems: mergeItems(Array.isArray(job.stagedItems) ? job.stagedItems : [], [enriched])
+  };
+}
+
+// Keep the legacy helper for previously committed data, but use the same
+// profile-to-item mapping as staged product tasks.
+async function mergeStoredItemWithProfile(identity, profile) {
+  const items = await readItems();
+  const existing = items.find(item => itemKey(item) === itemKey(identity || {}));
+  const patch = applyProfileToItem(existing, profile);
+  if (!patch) return false;
+  await writeItems(mergeItems(items, [patch]));
+  return true;
+}
+
 async function fetchSellerProfile(sellerUrl) {
   const url = validSellerUrl(sellerUrl);
   if (!url) throw new Error('没有识别到有效的卖家账号页链接。');
@@ -953,9 +1006,9 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
     || (await readStoreProfiles()).find(profile => sellerProfileKey(profile?.sellerUrl || '') === key);
   const identity = itemIdentity(item);
   if (cached) {
-    await mergeStoredItemWithProfile(identity, cached);
+    const stagedJob = mergeStagedItemWithProfile(job, item, cached);
     return { kind: 'cached', job: {
-      ...job,
+      ...stagedJob,
       sellerProfiles: { ...(job.sellerProfiles || {}), [key]: cached }
     } };
   }
@@ -1104,10 +1157,11 @@ async function processLinkJob(job) {
       resultKeys: [...new Set([...(job.resultKeys || []), ...(result.keys || [])])],
       retries: 0
     };
-    // 商品批量任务只读取商品详情页本身。店铺简介、评价和评价图片由“当前店铺页”
-    // 单独采集，避免任务为了补店铺资料跳到另一个标签页，也避免把店铺数据混入商品表。
+    const detailItem = collectedItemForLink(result, { itemUrl: job.links?.[job.index] || '' });
+    const enrichment = await prepareSellerEnrichment(next, detailItem, count);
+    if (enrichment.kind === 'scheduled') return enrichment.job;
     return advanceLinkJob({
-      ...next,
+      ...enrichment.job,
       collected: Number(job.collected || 0) + count
     });
   } catch (error) {
@@ -1151,6 +1205,10 @@ function assertDetailCollection(result) {
   }
   if (result.pageType !== 'detail') {
     throw new Error('当前打开的页面不是商品详情页，已跳过，避免把搜索卡片写入结果');
+  }
+  const count = Number(result.count ?? result.added ?? result.items?.length ?? 0);
+  if (!count) {
+    throw new Error('当前详情页还没有识别到有效商品资料，已等待页面完成渲染后重试');
   }
   return result;
 }
@@ -1400,8 +1458,10 @@ async function processSearchDetail(job) {
       expectedDetailUrl: '',
       resultKeys: [...new Set([...(job.resultKeys || []), ...(result.keys || [])])]
     };
-    // 搜索跨页同样只把逐个打开的详情页结果暂存在本次任务中；店铺资料另行采集。
-    return advanceSearchDetail(next, count);
+    const detailItem = collectedItemForLink(result, currentLink);
+    const enrichment = await prepareSellerEnrichment(next, detailItem, count);
+    if (enrichment.kind === 'scheduled') return enrichment.job;
+    return advanceSearchDetail(enrichment.job, count);
   } catch (error) {
     const retries = Number(job.retries || 0) + 1;
     if (retries <= 2) {
@@ -1425,11 +1485,12 @@ async function finishPendingSellerStep(job, profile = null, errorMessage = '') {
 
   if (profile) {
     const key = job.pendingSellerKey || sellerProfileKey(job.pendingSellerUrl);
+    const storedProfile = await persistStoreProfile(profile, job.pendingSellerUrl || '');
     const sellerProfiles = {
       ...(job.sellerProfiles || {}),
-      ...(key ? { [key]: profile } : {})
+      ...(key ? { [key]: storedProfile || profile } : {})
     };
-    await mergeStoredItemWithProfile(pending, profile);
+    next = mergeStagedItemWithProfile(next, pending, storedProfile || profile);
     next = { ...next, sellerProfiles };
   }
 
@@ -1755,6 +1816,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'COLLECT_STORE_PROFILE': {
         const profile = sanitizeStoreProfile(message.profile || {}, sender?.tab?.url || message.sourcePage || '');
         if (!profile) throw new Error('当前店铺页没有读取到可保存的公开资料。');
+        const persist = message.persistToDataCenter !== false;
+        const profiles = persist
+          ? await persistStoreProfile(profile, sender?.tab?.url || message.sourcePage || '')
+          : null;
+        const currentProfiles = persist ? await readStoreProfiles() : await readStoreProfiles();
+        return {
+          ok: true,
+          staged: !persist,
+          profile,
+          storeCount: currentProfiles.length,
+          reviewCount: profile.reviews?.length || 0,
+          totalReviews: currentProfiles.reduce((sum, item) => sum + Number(item.reviewCountLoaded || item.reviews?.length || 0), 0)
+        };
+      }
+
+      case 'COMMIT_STORE_PROFILE': {
+        const profile = sanitizeStoreProfile(message.profile || {}, sender?.tab?.url || message.sourcePage || '');
+        if (!profile) throw new Error('没有可加入数据中心的店铺资料。');
         const profiles = mergeStoreProfiles(await readStoreProfiles(), [profile]);
         await writeStoreProfiles(profiles);
         return {
@@ -1772,8 +1851,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return { ok: true, enriched: false, reason: '当前详情页没有公开的卖家账号页链接。' };
         }
         const profile = await fetchSellerProfile(sellerUrl);
-        const enriched = await mergeStoredItemWithProfile(item, profile);
-        return { ok: true, enriched, profile };
+        const storedProfile = await persistStoreProfile(profile, sellerUrl);
+        const enrichedItem = applyProfileToItem(item, storedProfile || profile);
+        return { ok: true, enriched: Boolean(enrichedItem), item: enrichedItem, profile: storedProfile || profile };
       }
 
       case 'GET_ITEMS':
