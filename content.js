@@ -702,15 +702,24 @@
   function accountProfileScope(root) {
     const infoTopSelector = '[class^="infoTop--"], [class*=" infoTop--"]';
     const explicitScope = root?.querySelector?.(infoTopSelector);
-    if (explicitScope) return explicitScope;
-
-    // 账号页的昵称可能先渲染，资料容器稍后才挂载。沿昵称祖先向上找同时包含
-    // 账号统计或简介节点的最小容器，避免把整页 body 当成店铺资料区域。
-    const nickSelector = '[class^="nick--"], [class*=" nick--"]';
     const structureSelector = [
       '[class^="infoCenterText--"]', '[class*=" infoCenterText--"]',
       '[class^="bottom--"]', '[class*=" bottom--"]'
     ].join(', ');
+
+    // infoTop 只包含昵称，地区、粉丝/关注和简介位于它的兄弟节点。
+    // 先从 infoTop 向上找同时包含这些结构的最小资料容器，不能把 infoTop 本身
+    // 当作完整资料区，否则就会出现“商品数有、粉丝和简介为空”的半成品记录。
+    if (explicitScope) {
+      let node = explicitScope;
+      for (let level = 0; level < 6 && node; level++, node = node.parentElement) {
+        if (node.querySelector?.(structureSelector)) return node;
+      }
+    }
+
+    // 账号页的昵称可能先渲染，资料容器稍后才挂载。沿昵称祖先向上找同时包含
+    // 账号统计或简介节点的最小容器，避免把整页 body 当成店铺资料区域。
+    const nickSelector = '[class^="nick--"], [class*=" nick--"]';
     for (const nickNode of root?.querySelectorAll?.(nickSelector) || []) {
       let node = nickNode;
       for (let level = 0; level < 8 && node; level++, node = node.parentElement) {
