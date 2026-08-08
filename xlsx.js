@@ -416,38 +416,42 @@
       reviewAssetMap.get(key).push(asset);
     }
 
-    // 店铺导出面向人工对照：店铺资料、评价文本和评价图片合成同一张“店铺综合”表。
-    // 内部仍按 profile/reviews/assets 分开保存，避免影响去重和增量更新；这里只改变导出形态。
-    const storeHeaders = [
+    // 店铺导出按用户实际对照方式拆成两张数据表：
+    // 1) “店铺资料”一店一行；2) “店铺评价综合”一条评价一行，评价图片与评价保持同一行。
+    // 内部仍按 profile/reviews/assets 分开保存，避免影响去重和增量更新。
+    const storeProfileHeaders = [
       '店铺名称', '卖家账号页', '卖家地区', '粉丝数', '关注数', '卖家商品数', '店铺简介', '开店时长',
-      '商品好评率', '店铺评价数', '采集时间', '来源页面', '已采集评价数',
-      '评价序号', '评价人', '身份', '评价内容', '评价时间/地区', '评价图片数', '评价图片文件名',
-      '评价图片状态', '评价图片', '评价图片失败地址', '评价采集时间'
+      '商品好评率', '店铺评价数', '采集时间', '来源页面', '已采集评价数'
     ];
-    const storeRows = [];
+    const storeProfileRows = safeProfiles.map(profile => [
+      profile.sellerName, profile.sellerUrl, profile.sellerLocation, profile.sellerFollowers,
+      profile.sellerFollowing, profile.sellerProductCount, profile.sellerIntro, profile.storeDuration,
+      profile.sellerGoodRate, profile.sellerReviewCount, profile.collectedAt, profile.sourcePage,
+      profile.reviews.length
+    ]);
+    const storeReviewHeaders = [
+      '店铺名称', '卖家账号页', '评价序号', '评价人', '身份', '评价内容', '评价时间/地区', '评价图片数',
+      '评价图片文件名', '评价图片状态', '评价图片', '评价图片失败地址', '评价采集时间'
+    ];
+    const storeReviewRows = [];
     const storePlacements = [];
     const storeRowHeights = {};
-    const reviewImageColumn = 21; // “评价图片”列，0-based
+    const reviewImageColumn = 10; // “评价图片”列，0-based
 
-    function appendStoreRow(profile, review = null, reviewIndex = 0) {
-      const assets = review
-        ? (reviewAssetMap.get(reviewKey(profile, review, reviewIndex)) || [])
-        : [];
+    function appendStoreReviewRow(profile, review, reviewIndex = 0) {
+      const assets = reviewAssetMap.get(reviewKey(profile, review, reviewIndex)) || [];
       const embeddedAssets = assets.filter(asset => Boolean(asset.bytes?.length));
       const imageNames = assets.map(asset => asset.fileName || '').filter(Boolean);
       const imageStatuses = assets.map(asset => asset.bytes?.length
         ? '成功'
         : `下载失败：${asset.error || '未知错误'}`);
       const failedUrls = assets.filter(asset => !asset.bytes?.length).map(asset => asset.url || '').filter(Boolean);
-      const rowIndex = storeRows.length;
-      storeRows.push([
-        profile.sellerName, profile.sellerUrl, profile.sellerLocation, profile.sellerFollowers,
-        profile.sellerFollowing, profile.sellerProductCount, profile.sellerIntro, profile.storeDuration,
-        profile.sellerGoodRate, profile.sellerReviewCount, profile.collectedAt, profile.sourcePage,
-        profile.reviews.length,
-        review ? (review.reviewIndex || reviewIndex + 1) : '', review?.reviewer || '', review?.role || '',
-        review?.feedback || '', review?.timeIp || '', review ? review.images.length : '',
-        imageNames.join('\n'), imageStatuses.join('\n'), '', failedUrls.join('\n'), review?.collectedAt || ''
+      const rowIndex = storeReviewRows.length;
+      storeReviewRows.push([
+        profile.sellerName, profile.sellerUrl,
+        review.reviewIndex || reviewIndex + 1, review.reviewer || '', review.role || '',
+        review.feedback || '', review.timeIp || '', review.images.length,
+        imageNames.join('\n'), imageStatuses.join('\n'), '', failedUrls.join('\n'), review.collectedAt || ''
       ]);
 
       if (embeddedAssets.length) {
@@ -470,19 +474,14 @@
     }
 
     for (const profile of safeProfiles) {
-      if (profile.reviews.length) {
-        profile.reviews.forEach((review, index) => appendStoreRow(profile, review, index));
-      } else {
-        // 即使店铺当前没有公开评价，也保留一行店铺资料，避免导出后整张表为空。
-        appendStoreRow(profile);
-      }
+      profile.reviews.forEach((review, index) => appendStoreReviewRow(profile, review, index));
     }
 
     const notes = [
       ['项目', '说明'],
       ['商品主表', '商品主表按需求固定为 18 列：商品 ID、链接、主图文件名、真实嵌入图片、商品文案、价格、类目、店铺资料、商品好评率、店铺评价数和采集时间。'],
-      ['图片处理', '导出时会下载图片并将真实图片二进制嵌入 Excel；商品图片上限只限制商品图，已读取的评价图片会单独处理；店铺综合表中的评价图片与评价文本保持同一行，不把 URL 当作图片本身。'],
-      ['店铺综合表', '店铺资料字段会重复写入每条评价所在行；评价序号、评价人、身份、内容、时间/地区、评价图片文件名、图片状态和失败地址也在同一行，评价图片会直接嵌入“评价图片”列。没有公开评价时仍保留一行店铺资料。'],
+      ['图片处理', '导出时会下载图片并将真实图片二进制嵌入 Excel；商品图片上限只限制商品图，已读取的评价图片会单独处理；店铺评价综合表中的评价图片与评价文本保持同一行，不把 URL 当作图片本身。'],
+      ['店铺表', '店铺资料单独放在“店铺资料”表，一店一行；店铺评价和评价图片放在“店铺评价综合”表，一条评价一行。评价图片文件名、图片状态、失败地址和真实图片都在对应评价行；没有公开评价时，店铺资料表仍保留该店铺。'],
       ['类目说明', '服务类商品优先使用详情属性区的“服务类型”（例如“金融”）作为类目；如果页面没有服务类型，再使用可见面包屑；只有 URL 内部 categoryId 而没有公开名称时留空，不编造类目名称。'],
       ['图片文件名', '商品图片格式为“商品标题_店铺名_商品ID_图序号.扩展名”；评价图片格式为“店铺名_评价序号_图序号.扩展名”。'],
       ['下载失败', '如果图片 CDN 拒绝扩展程序访问，会在对应状态列标出错误；成功下载的图片不会退回成只保留链接。'],
@@ -500,7 +499,7 @@
     }
     const mainDrawing = storeOnly ? null : addDrawing(1, mainPlacements);
     const imageDrawing = storeOnly ? null : addDrawing(2, imagePlacements);
-    const storeDrawing = storeOnly ? addDrawing(1, storePlacements) : null;
+    const storeDrawing = storeOnly ? addDrawing(2, storePlacements) : null;
     const imageDefaults = [...new Set(media.mediaFiles.map(file => file.extension))]
       .map(extension => `<Default Extension="${extension}" ContentType="${contentTypeForExtension(extension)}"/>`)
       .join('');
@@ -510,21 +509,22 @@
 
     const sheetNumbers = storeOnly ? [1, 2] : [1, 2, 3];
     const workbookSheets = storeOnly
-      ? '<sheet name="店铺综合" sheetId="1" r:id="rId1"/><sheet name="说明" sheetId="2" r:id="rId2"/>'
+      ? '<sheet name="店铺资料" sheetId="1" r:id="rId1"/><sheet name="店铺评价综合" sheetId="2" r:id="rId2"/>'
       : '<sheet name="商品数据" sheetId="1" r:id="rId1"/><sheet name="图片索引" sheetId="2" r:id="rId2"/><sheet name="说明" sheetId="3" r:id="rId3"/>';
     const worksheetFiles = storeOnly
       ? [
         {
           name: 'xl/worksheets/sheet1.xml',
-          data: sheetXml(storeHeaders, storeRows, [22, 44, 14, 12, 12, 14, 48, 14, 18, 14, 22, 44, 14, 10, 18, 14, 80, 32, 12, 56, 24, 28, 60, 22], {
-            rowHeights: storeRowHeights,
-            drawingRelId: storeDrawing ? 'rId1' : '',
+          data: sheetXml(storeProfileHeaders, storeProfileRows, [22, 44, 14, 12, 12, 14, 48, 14, 18, 14, 22, 44, 14], {
             selected: true
           })
         },
         {
           name: 'xl/worksheets/sheet2.xml',
-          data: sheetXml(notes[0], notes.slice(1), [18, 110])
+          data: sheetXml(storeReviewHeaders, storeReviewRows, [22, 44, 10, 18, 14, 80, 32, 12, 56, 24, 28, 60, 22], {
+            rowHeights: storeRowHeights,
+            drawingRelId: storeDrawing ? 'rId1' : ''
+          })
         }
       ]
       : [
