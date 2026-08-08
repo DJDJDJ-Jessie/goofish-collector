@@ -38,7 +38,7 @@
   const SCREEN_META = {
     home: { kicker: 'WORKSPACE', title: '闲鱼研究助手', subtitle: '从公开详情页整理同行商品与店铺信息' },
     detail: { kicker: 'CURRENT DETAIL', title: '采集当前详情', subtitle: '读取此刻打开的商品详情页' },
-    store: { kicker: 'CURRENT STORE', title: '采集当前店铺页', subtitle: '读取店铺资料、评价和评价图片' },
+    store: { kicker: 'CURRENT STORE', title: '采集当前店铺页', subtitle: '读取店铺资料、评价和图片并合成一张综合表' },
     links: { kicker: 'BATCH INPUT', title: '批量商品链接', subtitle: '自动逐个打开商品详情页' },
     search: { kicker: 'SEARCH CRAWL', title: '搜索跨页采集', subtitle: '按页码推进，并逐个进入详情页' },
     data: { kicker: 'LOCAL DATASET', title: '数据中心', subtitle: '查看记录、下载 Excel 和图片索引' },
@@ -912,7 +912,7 @@
   async function exportItems(button = $('exportButton')) {
     const isCurrentStoreExport = button.id === 'storeExportButton';
     const isStoreExport = isCurrentStoreExport || button.id === 'storeDataExportButton';
-    const idleLabel = isCurrentStoreExport ? '立即下载 Excel' : button.id === 'storeDataExportButton' ? '下载店铺表 Excel' : '下载商品表 Excel';
+    const idleLabel = isCurrentStoreExport ? '立即下载 Excel' : button.id === 'storeDataExportButton' ? '下载店铺综合表 Excel' : '下载商品表 Excel';
     button.disabled = true;
     button.textContent = '正在生成 Excel…';
     setStatus('正在下载图片并生成包含真实图片的 Excel…');
@@ -932,9 +932,9 @@
       const result = response.result || {};
       const details = `${result.embedded || 0} 张图片已嵌入${result.failed ? `，${result.failed} 张下载失败` : ''}`;
       if (isStoreExport) {
-        setStatus(`店铺资料 Excel 已下载：包含 ${result.storeCount || 0} 个店铺、${result.reviewCount || 0} 条评价；${details}。`, result.failed ? '' : 'success');
+        setStatus(`店铺综合 Excel 已下载：${result.storeCount || 0} 个店铺、${result.reviewCount || 0} 条评价已合并到同一张表；${details}。`, result.failed ? '' : 'success');
         if (isCurrentStoreExport && $('storeCollectHint')) {
-          $('storeCollectHint').textContent = `店铺 Excel 已下载：打开后会直接显示“店铺评价”；文件还包含“店铺资料”“评价图片”“说明”工作表。本次共 ${result.reviewCount || 0} 条评价、${result.embedded || 0} 张嵌入图片。`;
+          $('storeCollectHint').textContent = `店铺综合 Excel 已下载：打开“店铺综合”即可同时对照店铺资料、评价和评价图片；本次共 ${result.reviewCount || 0} 条评价、${result.embedded || 0} 张嵌入图片。`;
         }
       } else {
         setStatus(`已下载 ${result.itemCount || 0} 条记录；${details}。`, result.failed ? '' : 'success');
