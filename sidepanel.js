@@ -87,6 +87,48 @@
     try { return new URL(url).hostname.endsWith('goofish.com'); } catch (_) { return false; }
   }
 
+  function itemIdFromUrl(value) {
+    try {
+      const url = new URL(value || '');
+      for (const key of ['id', 'itemId', 'item_id', 'auctionId', 'auction_id']) {
+        const found = url.searchParams.get(key);
+        if (found) return found;
+      }
+      return url.pathname.match(/(?:item|detail)[/_-]?(\d{5,})/i)?.[1] || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function sellerIdFromUrl(value) {
+    try {
+      const url = new URL(value || '');
+      return url.pathname.startsWith('/personal') ? (url.searchParams.get('userId') || '') : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function isDetailUrl(value) {
+    return Boolean(itemIdFromUrl(value));
+  }
+
+  function isAccountUrl(value) {
+    return Boolean(sellerIdFromUrl(value));
+  }
+
+  function sameDetailSource(first, second) {
+    const firstId = itemIdFromUrl(first);
+    const secondId = itemIdFromUrl(second);
+    return Boolean(firstId && secondId && firstId === secondId);
+  }
+
+  function sameStoreSource(first, second) {
+    const firstId = sellerIdFromUrl(first);
+    const secondId = sellerIdFromUrl(second);
+    return Boolean(firstId && secondId && firstId === secondId);
+  }
+
   function setStatus(message, kind = '') {
     const node = $('status');
     node.textContent = message;
@@ -230,14 +272,14 @@
     });
   }
 
-  async function sendToTabWithRecovery(tabId, message) {
+  async function sendToTabWithRecovery(tabId, message, timeoutMs = TAB_MESSAGE_TIMEOUT_MS) {
     try {
-      return await sendToTab(tabId, message);
+      return await sendToTab(tabId, message, timeoutMs);
     } catch (firstError) {
       try {
         await executeScript({ target: { tabId }, world: 'MAIN', files: ['main-world.js'] }).catch(() => {});
         await executeScript({ target: { tabId }, world: 'ISOLATED', files: ['content.js'] });
-        return await sendToTab(tabId, message);
+        return await sendToTab(tabId, message, timeoutMs);
       } catch (secondError) {
         throw new Error(secondError?.message || firstError?.message || '无法连接当前闲鱼页面，请刷新页面后重试。');
       }
@@ -299,10 +341,14 @@
   async function refreshCurrentPage() {
     const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     activeTab = tabs[0] || null;
-    if (pendingCurrentSourceUrl && activeTab?.url && pendingCurrentSourceUrl !== activeTab.url) {
+    // 详情补采集会在同一标签页临时进入账号页并返回；跟踪参数也可能被闲鱼重写。
+    // 只有用户明确切换到“另一个商品详情”时才清掉暂存结果，避免成功后按钮立刻变灰。
+    if (pendingCurrentSourceUrl && activeTab?.url && isDetailUrl(activeTab.url)
+      && !sameDetailSource(pendingCurrentSourceUrl, activeTab.url)) {
       clearCurrentResult();
     }
-    if (pendingCurrentStoreSourceUrl && activeTab?.url && pendingCurrentStoreSourceUrl !== activeTab.url) {
+    if (pendingCurrentStoreSourceUrl && activeTab?.url && isAccountUrl(activeTab.url)
+      && !sameStoreSource(pendingCurrentStoreSourceUrl, activeTab.url)) {
       clearCurrentStoreResult();
     }
     const supported = Boolean(activeTab && isGoofishUrl(activeTab.url || ''));
@@ -515,16 +561,20 @@
       if (!page?.ok || page.pageType !== 'detail') {
         throw new Error('当前是搜索页。请打开商品详情页，或使用“搜索跨页”自动逐个采集。');
       }
+      clearCurrentResult();
       const result = await sendToTabWithRecovery(activeTab.id, {
         type: selectedMode === 'api' ? 'START_API_CAPTURE' : 'COLLECT_CURRENT_PAGE',
         persistToDataCenter: false
-      });
+      }, 35_000);
       if (!result?.ok) throw new Error(result?.error || '采集失败');
-      pendingCurrentItems = Array.isArray(result.items) ? result.items.filter(Boolean) : [];
+      pendingCurrentItems = (Array.isArray(result.items)
+        ? result.items
+        : Array.isArray(result.stagedItems) ? result.stagedItems : [])
+        .filter(Boolean);
       pendingCurrentSourceUrl = activeTab.url || '';
       currentItemsCommitted = false;
-      const count = pendingCurrentItems.length || Number(result.count ?? result.added ?? 0);
-      if (count) {
+      const count = pendingCurrentItems.length;
+      if (count > 0) {
         let enrichedCount = 0;
         for (const item of [...pendingCurrentItems]) {
           if (!item || (!item.itemId && !item.itemUrl)) continue;
@@ -553,6 +603,9 @@
         $('currentCollectHint').textContent = `当前详情页采集完成：${count} 条商品结果已暂存${enrichedCount ? `，已补充 ${enrichedCount} 个店铺基础资料` : ''}。请选择“加到数据中心商品表”或“导出当前详情页”；完整店铺评价请单独进入店铺页采集。`;
         setStatus(`当前详情页采集完成：${count} 条结果已暂存${enrichedCount ? `，店铺资料已补充 ${enrichedCount} 个` : ''}，等待你选择加入总表或单独导出。`, 'success');
       }
+      else if (Number(result.count ?? result.added ?? 0) > 0) {
+        throw new Error('页面声称采集成功，但没有返回可导出的商品行；本次不再显示假成功，请刷新页面后重试。');
+      }
       else if (selectedMode === 'api') setStatus('页面没有捕获到可识别的公开详情接口；可以切换页面详情模式重试。', 'error');
       else setStatus('当前页面暂未识别到商品，请等待加载或滚动后重试。', 'error');
     } catch (error) {
@@ -561,6 +614,7 @@
       button.disabled = false;
       button.textContent = '采集当前详情页';
       await refreshCurrentPage().catch(() => {});
+      renderCurrentResultActions();
     }
   }
 
@@ -636,7 +690,7 @@
       const result = await sendToTabWithRecovery(activeTab.id, {
         type: 'COLLECT_CURRENT_STORE_PAGE',
         persistToDataCenter: false
-      });
+      }, 55_000);
       if (!result?.ok) throw new Error(result?.error || '店铺页采集失败');
       pendingCurrentStoreProfile = result.profile || null;
       pendingCurrentStoreSourceUrl = activeTab.url || '';
@@ -652,6 +706,7 @@
       button.disabled = false;
       button.textContent = '采集当前店铺页';
       await refreshCurrentPage().catch(() => {});
+      renderStoreStatus(currentPageType, currentStoreStatus);
     }
   }
 
@@ -866,7 +921,9 @@
         type: 'EXPORT_ITEMS',
         mode: selectedMode,
         taskType: isStoreExport ? 'store' : 'data',
-        sellerUrl: isCurrentStoreExport ? (activeTab?.url || '') : undefined,
+        sellerUrl: isCurrentStoreExport
+          ? (pendingCurrentStoreProfile?.sellerUrl || pendingCurrentStoreSourceUrl || activeTab?.url || '')
+          : undefined,
         storeProfiles: isCurrentStoreExport && pendingCurrentStoreProfile
           ? [pendingCurrentStoreProfile]
           : undefined
@@ -876,6 +933,9 @@
       const details = `${result.embedded || 0} 张图片已嵌入${result.failed ? `，${result.failed} 张下载失败` : ''}`;
       if (isStoreExport) {
         setStatus(`店铺资料 Excel 已下载：包含 ${result.storeCount || 0} 个店铺、${result.reviewCount || 0} 条评价；${details}。`, result.failed ? '' : 'success');
+        if (isCurrentStoreExport && $('storeCollectHint')) {
+          $('storeCollectHint').textContent = `店铺 Excel 已下载：打开后会直接显示“店铺评价”；文件还包含“店铺资料”“评价图片”“说明”工作表。本次共 ${result.reviewCount || 0} 条评价、${result.embedded || 0} 张嵌入图片。`;
+        }
       } else {
         setStatus(`已下载 ${result.itemCount || 0} 条记录；${details}。`, result.failed ? '' : 'success');
       }

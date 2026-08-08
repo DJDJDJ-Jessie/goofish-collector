@@ -998,6 +998,31 @@
     return Boolean(document.querySelector('h1') && hasDetailText && hasProductImage && !hasItemLinks);
   }
 
+  function candidateVisualPosition(candidate) {
+    const node = candidate?.node || candidate?.anchor;
+    if (!node?.getBoundingClientRect) return { top: Number.MAX_SAFE_INTEGER, left: Number.MAX_SAFE_INTEGER };
+    try {
+      const rect = node.getBoundingClientRect();
+      return {
+        top: Math.round(rect.top + (window.scrollY || document.documentElement?.scrollTop || 0)),
+        left: Math.round(rect.left + (window.scrollX || document.documentElement?.scrollLeft || 0))
+      };
+    } catch (_) {
+      return { top: Number.MAX_SAFE_INTEGER, left: Number.MAX_SAFE_INTEGER };
+    }
+  }
+
+  function sortCandidatesByVisualOrder(candidates) {
+    return [...candidates]
+      .map((candidate, domIndex) => ({ candidate, domIndex, position: candidateVisualPosition(candidate) }))
+      .sort((first, second) => (
+        first.position.top - second.position.top
+        || first.position.left - second.position.left
+        || first.domIndex - second.domIndex
+      ))
+      .map(entry => entry.candidate);
+  }
+
   function cardCandidates() {
     const standardCards = [...document.querySelectorAll(
       '[class^="feeds-item-wrap--"], [class*=" feeds-item-wrap--"]'
@@ -1011,7 +1036,7 @@
       .filter(candidate => candidate.anchor?.href);
 
     if (standardCards.length) {
-      return standardCards.slice(0, MAX_PAGE_ITEMS);
+      return sortCandidatesByVisualOrder(standardCards).slice(0, MAX_PAGE_ITEMS);
     }
 
     const anchors = [...document.querySelectorAll('a[href]')]
@@ -1042,11 +1067,11 @@
     }
 
     const seenNodes = new Set();
-    return candidates.filter(candidate => {
+    return sortCandidatesByVisualOrder(candidates.filter(candidate => {
       if (seenNodes.has(candidate.node)) return false;
       seenNodes.add(candidate.node);
       return true;
-    }).slice(0, MAX_PAGE_ITEMS);
+    })).slice(0, MAX_PAGE_ITEMS);
   }
 
   function buildCardItem(candidate) {
@@ -1101,21 +1126,57 @@
     const items = [];
     const seen = new Set();
 
-    // 优先使用带有价格和图片的标准商品卡片。
-    for (const candidate of cardCandidates()) {
-      const item = buildCardItem(candidate);
-      if (!item?.itemUrl || seen.has(item.itemUrl)) continue;
-      seen.add(item.itemUrl);
-      items.push(item);
+    function identity(item) {
+      const id = oneLine(item?.itemId || extractItemIdFromUrl(item?.itemUrl || ''), 200);
+      return id ? `id:${id}` : `url:${toAbsoluteUrl(item?.itemUrl || '')}`;
     }
 
-    // 对“面议”、价格异步加载或卡片结构变化的商品，退回到商品链接本身。
+    function matchingNetworkItem(item) {
+      const key = identity(item);
+      if (!key || key === 'url:') return null;
+      for (let index = networkBuffer.length - 1; index >= 0; index--) {
+        const candidate = networkBuffer[index];
+        if (!/^network:search/i.test(String(candidate?.dataSource || ''))
+          && !/idlemtopsearch\.pc\.search/i.test(String(candidate?.sourcePage || ''))) continue;
+        if (identity(candidate) === key) return candidate;
+      }
+      return null;
+    }
+
+    function addDomOrderedItem(rawItem) {
+      if (!rawItem?.itemUrl) return;
+      const key = identity(rawItem);
+      if (!key || key === 'url:' || seen.has(key)) return;
+      const networkItem = matchingNetworkItem(rawItem);
+      const merged = networkItem
+        ? normalizeItem({
+            ...mergeItemValues(networkItem, rawItem),
+            images: unique([...(networkItem.images || []), ...(rawItem.images || [])]),
+            reviewSamples: unique([...(networkItem.reviewSamples || []), ...(rawItem.reviewSamples || [])]),
+            itemUrl: rawItem.itemUrl,
+            sourcePage: location.href
+          }, 'search-dom,network:search')
+        : rawItem;
+      if (!merged?.itemUrl) return;
+      seen.add(key);
+      items.push(merged);
+    }
+
+    // 搜索顺序必须由页面上真实商品卡片的位置决定：从上到下、从左到右。
+    // 接口缓存只能为同一商品补字段，不能把旧页/异步响应的顺序带进当前任务。
+    for (const candidate of cardCandidates()) {
+      addDomOrderedItem(buildCardItem(candidate));
+    }
+
+    // 对“面议”、价格异步加载或卡片结构变化的商品，退回到商品链接本身；
+    // 仍按链接所在卡片的屏幕坐标排序。
     const anchors = [...document.querySelectorAll('a[href]')]
-      .filter(anchor => /(?:\/item(?:[/?#])|[?&](?:itemId|item_id|id|auctionId)=)/i.test(anchor.href));
-    for (const anchor of anchors) {
+      .filter(anchor => /(?:\/item(?:[/?#])|[?&](?:itemId|item_id|id|auctionId)=)/i.test(anchor.href))
+      .map(anchor => ({ anchor, node: findCardRootForAnchor(anchor) }));
+    for (const candidate of sortCandidatesByVisualOrder(anchors)) {
+      const anchor = candidate.anchor;
       const itemUrl = toAbsoluteUrl(anchor.href);
-      if (!itemUrl || seen.has(itemUrl)) continue;
-      const root = findCardRootForAnchor(anchor);
+      const root = candidate.node;
       const item = normalizeItem({
         itemId: extractItemIdFromUrl(itemUrl),
         title: firstMeaningfulTitle(root, anchor),
@@ -1126,24 +1187,7 @@
         sellerName: sellerNameFromRoot(root),
         sourcePage: location.href
       }, 'search-link');
-      if (!item?.itemUrl) continue;
-      seen.add(item.itemUrl);
-      items.push(item);
-    }
-
-    // 搜索接口里的 resultList 是最稳定的链接来源；它补足了价格异步加载、
-    // 卡片尚未完成渲染以及页面只渲染首屏时的情况。最终仍由后台逐个打开详情页。
-    for (const networkItem of networkBuffer) {
-      if (!/^network:search/i.test(String(networkItem.dataSource || ''))
-        && !/idlemtopsearch\.pc\.search/i.test(String(networkItem.sourcePage || ''))) continue;
-      if (!networkItem?.itemUrl || seen.has(networkItem.itemUrl)) continue;
-      const item = normalizeItem({
-        ...networkItem,
-        sourcePage: location.href
-      }, networkItem.dataSource || 'network:search');
-      if (!item?.itemUrl) continue;
-      seen.add(item.itemUrl);
-      items.push(item);
+      addDomOrderedItem(item);
     }
 
     return items.slice(0, MAX_PAGE_ITEMS);
@@ -1517,6 +1561,250 @@
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  function visibleElement(node) {
+    if (!node?.getBoundingClientRect) return false;
+    try {
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && Number(style.opacity || 1) > 0
+        && rect.width > 8
+        && rect.height > 8;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function publicLoginDialog() {
+    const bodyText = oneLine(document.body?.innerText || '', 20000);
+    if (!bodyText.includes('短信登录') || !bodyText.includes('手机扫码安全登录')) return null;
+
+    const selectors = [
+      '[role="dialog"]',
+      '[class*="login"]', '[class*="Login"]',
+      '[class*="modal"]', '[class*="Modal"]',
+      '[class*="dialog"]', '[class*="Dialog"]'
+    ].join(', ');
+    let candidates = [...document.querySelectorAll(selectors)]
+      .filter(visibleElement)
+      .filter(node => {
+        const text = oneLine(node.innerText || node.textContent || '', 5000);
+        return text.includes('短信登录') && text.includes('手机扫码安全登录');
+      })
+      .map(node => {
+        const rect = node.getBoundingClientRect();
+        return { node, area: rect.width * rect.height };
+      })
+      .sort((first, second) => first.area - second.area);
+
+    if (!candidates.length) {
+      candidates = [...document.querySelectorAll('div, section, form')]
+        .filter(visibleElement)
+        .filter(node => {
+          const text = oneLine(node.innerText || node.textContent || '', 5000);
+          return text.includes('短信登录') && text.includes('手机扫码安全登录');
+        })
+        .map(node => {
+          const rect = node.getBoundingClientRect();
+          return { node, area: rect.width * rect.height };
+        })
+        .sort((first, second) => first.area - second.area);
+    }
+
+    return candidates[0]?.node || null;
+  }
+
+  async function dismissPublicLoginOverlay() {
+    const dialog = publicLoginDialog();
+    if (!dialog) return { visible: false, dismissed: false };
+
+    const dialogRect = dialog.getBoundingClientRect();
+    const controls = [...dialog.querySelectorAll('button, [role="button"], a, div, span')]
+      .filter(visibleElement)
+      .map(node => {
+        const rect = node.getBoundingClientRect();
+        const label = oneLine([
+          node.getAttribute?.('aria-label'),
+          node.getAttribute?.('title'),
+          node.textContent,
+          node.getAttribute?.('class')
+        ].filter(Boolean).join(' '), 300);
+        const semanticClose = /关闭|close/i.test(label)
+          || /^(?:×|x)$/i.test(oneLine(node.textContent || '', 10));
+        const compactTopRight = rect.right >= dialogRect.right - 100
+          && rect.top <= dialogRect.top + 100
+          && rect.width <= 72
+          && rect.height <= 72;
+        let score = 0;
+        if (!semanticClose && !compactTopRight) return { node, score };
+        if (/关闭|close/i.test(label)) score += 20;
+        if (/^(?:×|x)$/i.test(oneLine(node.textContent || '', 10))) score += 16;
+        if (rect.right >= dialogRect.right - 100 && rect.top <= dialogRect.top + 100) score += 8;
+        if (rect.width <= 72 && rect.height <= 72) score += 4;
+        if (node.querySelector?.('svg')) score += 3;
+        return { node, score };
+      })
+      .filter(entry => entry.score >= 10)
+      .sort((first, second) => second.score - first.score);
+
+    let clicked = false;
+    const closeControl = controls[0]?.node;
+    if (closeControl) {
+      try {
+        closeControl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+        clicked = true;
+      } catch (_) {
+        clicked = false;
+      }
+    }
+
+    await delay(220);
+    if (publicLoginDialog()) {
+      // 当前登录窗允许点击遮罩关闭。只在确认登录窗仍可见时点击弹窗外的遮罩，
+      // 不填写账号、验证码，也不触碰登录按钮。
+      const outsidePoints = [
+        { x: Math.max(8, Math.min(window.innerWidth - 8, dialogRect.left - 24)), y: Math.max(8, dialogRect.top + 24) },
+        { x: 12, y: 12 }
+      ];
+      for (const point of outsidePoints) {
+        const target = document.elementFromPoint(point.x, point.y);
+        if (!target || dialog.contains(target)) continue;
+        try {
+          target.dispatchEvent(new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: point.x,
+            clientY: point.y
+          }));
+          clicked = true;
+          break;
+        } catch (_) {
+          // Continue to the next safe outside point.
+        }
+      }
+      await delay(260);
+    }
+
+    return { visible: Boolean(publicLoginDialog()), dismissed: clicked && !publicLoginDialog() };
+  }
+
+  function detailPageLooksReady() {
+    if (!isDetailPage()) return false;
+    const item = buildDetailItem();
+    if (!item || !sameDetailIdentity(item)) return false;
+    return [
+      item.description,
+      item.price,
+      item.sellerName,
+      item.sellerUrl,
+      Array.isArray(item.images) && item.images.length ? 'images' : ''
+    ].filter(Boolean).length >= 3;
+  }
+
+  function accountPageLooksReady() {
+    if (pageType() !== 'account') return false;
+    const profile = accountProfileFromPage();
+    if (!profile?.sellerName || profile.profileScope !== 'account-info-scope') return false;
+    return [
+      profile.sellerLocation,
+      profile.sellerFollowers,
+      profile.sellerFollowing,
+      profile.sellerProductCount,
+      profile.sellerIntro,
+      profile.storeDuration,
+      profile.sellerGoodRate,
+      profile.sellerReviewCount
+    ].filter(value => String(value ?? '').trim() !== '').length >= 2;
+  }
+
+  async function preparePublicPage(expectedPageType = '', maxAttempts = 12) {
+    const expected = ['detail', 'search', 'account'].includes(expectedPageType) ? expectedPageType : pageType();
+    let overlay = { visible: false, dismissed: false };
+    let actual = pageType();
+
+    for (let attempt = 0; attempt < Math.max(3, Number(maxAttempts) || 12); attempt++) {
+      overlay = await dismissPublicLoginOverlay();
+      actual = pageType();
+      const ready = actual === expected && (
+        expected === 'detail'
+          ? detailPageLooksReady()
+          : expected === 'account'
+            ? accountPageLooksReady()
+            : cardCandidates().length > 0
+      );
+      if (ready) {
+        return { ok: true, ready: true, pageType: actual, overlayDismissed: overlay.dismissed };
+      }
+      if (attempt < maxAttempts - 1) await delay(attempt < 2 ? 450 : 700);
+    }
+
+    return {
+      ok: true,
+      ready: false,
+      pageType: actual,
+      overlayVisible: overlay.visible,
+      error: actual !== expected
+        ? `页面类型尚未就绪：期望 ${expected}，当前 ${actual}。`
+        : '页面主体字段尚未稳定加载。'
+    };
+  }
+
+  async function collectSearchLinksInVisualOrder() {
+    const prepared = await preparePublicPage('search', 12);
+    if (!prepared.ready) return { ...prepared, items: [] };
+
+    const originalX = window.scrollX || 0;
+    const originalY = window.scrollY || 0;
+    const ordered = new Map();
+    let stableBottomRounds = 0;
+    let previousCount = 0;
+
+    try {
+      window.scrollTo({ top: 0, left: originalX, behavior: 'auto' });
+      await delay(260);
+
+      for (let round = 0; round < 18; round++) {
+        await dismissPublicLoginOverlay();
+        for (const item of searchLinkItems()) {
+          const key = item.itemId
+            ? `id:${item.itemId}`
+            : `url:${toAbsoluteUrl(item.itemUrl || '')}`;
+          if (!key || key === 'url:') continue;
+          if (!ordered.has(key)) ordered.set(key, item);
+          else ordered.set(key, {
+            ...mergeItemValues(ordered.get(key), item),
+            images: unique([...(ordered.get(key).images || []), ...(item.images || [])]),
+            reviewSamples: unique([...(ordered.get(key).reviewSamples || []), ...(item.reviewSamples || [])])
+          });
+        }
+
+        const scrollRoot = document.scrollingElement || document.documentElement;
+        const maxTop = Math.max(0, scrollRoot.scrollHeight - window.innerHeight);
+        const atBottom = (window.scrollY || scrollRoot.scrollTop || 0) >= maxTop - 120;
+        const currentCount = ordered.size;
+        stableBottomRounds = atBottom && currentCount === previousCount ? stableBottomRounds + 1 : 0;
+        previousCount = currentCount;
+        if (atBottom && stableBottomRounds >= 2) break;
+
+        const nextTop = Math.min(maxTop, (window.scrollY || scrollRoot.scrollTop || 0) + Math.max(620, window.innerHeight * 0.82));
+        window.scrollTo({ top: nextTop, left: originalX, behavior: 'auto' });
+        await delay(round < 3 ? 320 : 460);
+      }
+    } finally {
+      window.scrollTo({ top: originalY, left: originalX, behavior: 'auto' });
+    }
+
+    return {
+      ok: true,
+      ready: ordered.size > 0,
+      pageType: pageType(),
+      items: [...ordered.values()].slice(0, MAX_PAGE_ITEMS),
+      overlayDismissed: prepared.overlayDismissed
+    };
+  }
+
   function sendRuntimeRequest(message, timeoutMs = RUNTIME_MESSAGE_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -1557,6 +1845,7 @@
 
   async function loadAllAccountReviews() {
     const originalScroll = window.scrollY || 0;
+    await dismissPublicLoginOverlay();
     await activateReviewTab();
     const container = reviewScrollContainer();
     let stableRounds = 0;
@@ -1564,6 +1853,7 @@
     const expected = Math.min(1000, Number(reviewCountFromPage(document.body)) || 1000);
 
     for (let round = 0; round < 45; round++) {
+      await dismissPublicLoginOverlay();
       const cards = [...document.querySelectorAll('[class^="rateItem--"], [class*=" rateItem--"]')];
       const count = cards.length;
       const last = cards[cards.length - 1];
@@ -1588,8 +1878,12 @@
   }
 
   async function collectStoreProfile(persistToDataCenter = true) {
+    const prepared = await preparePublicPage('account', 14);
     if (pageType() !== 'account') {
       return { ok: false, pageType: pageType(), error: '当前不是卖家账号页，请先打开闲鱼店铺/账号页。' };
+    }
+    if (!prepared.ready) {
+      return { ok: false, pageType: pageType(), error: prepared.error || '店铺资料尚未稳定加载，请稍后重试。' };
     }
     const reviews = await loadAllAccountReviews();
     const profile = accountProfileFromPage();
@@ -1841,17 +2135,18 @@
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === 'COLLECT_CURRENT_PAGE') {
-      if (!isDetailPage()) {
-        sendResponse({
-          ok: false,
-          pageType: pageType(),
-          error: '当前不是商品详情页，搜索卡片不会作为最终商品记录保存。'
-        });
-        return false;
-      }
       captureEnabled = true;
       pagePersistToDataCenter = message.persistToDataCenter !== false;
       Promise.resolve().then(async () => {
+        const prepared = await preparePublicPage('detail', 14);
+        if (!prepared.ready || !isDetailPage()) {
+          sendResponse({
+            ok: false,
+            pageType: pageType(),
+            error: prepared.error || '当前不是已稳定加载的商品详情页，搜索卡片不会作为最终商品记录保存。'
+          });
+          return;
+        }
         const found = scanDom();
         const result = await sendItems(found, 'manual', { persistToDataCenter: pagePersistToDataCenter });
         sendResponse({
@@ -1871,20 +2166,22 @@
     }
 
     if (message?.type === 'START_API_CAPTURE') {
-      if (!isDetailPage()) {
-        sendResponse({
-          ok: false,
-          pageType: pageType(),
-          error: '接口观察模式也必须落在商品详情页，搜索列表响应不会作为最终记录保存。'
-        });
-        return false;
-      }
-
       captureEnabled = true;
       pagePersistToDataCenter = message.persistToDataCenter !== false;
-      document.dispatchEvent(new CustomEvent(API_SNAPSHOT_REQUEST));
-      setTimeout(async () => {
+      Promise.resolve().then(async () => {
         try {
+          const prepared = await preparePublicPage('detail', 14);
+          if (!prepared.ready || !isDetailPage()) {
+            sendResponse({
+              ok: false,
+              pageType: pageType(),
+              mode: 'api',
+              error: prepared.error || '接口观察模式必须落在已稳定加载的商品详情页。'
+            });
+            return;
+          }
+          document.dispatchEvent(new CustomEvent(API_SNAPSHOT_REQUEST));
+          await delay(180);
           // 接口响应可能在扩展刚加载前就完成，因此用当前详情 DOM 做一次轻量合并，
           // 让“接口观察”在旧标签页上也有可解释的回退结果。
           const domFound = scanDom();
@@ -1920,7 +2217,14 @@
             error: error?.message || String(error)
           });
         }
-      }, 150);
+      });
+      return true;
+    }
+
+    if (message?.type === 'PREPARE_PUBLIC_PAGE') {
+      preparePublicPage(message.expectedPageType || pageType(), message.maxAttempts || 12)
+        .then(sendResponse)
+        .catch(error => sendResponse({ ok: false, ready: false, pageType: pageType(), error: error?.message || String(error) }));
       return true;
     }
 
@@ -1934,15 +2238,19 @@
         sendResponse({ ok: false, pageType: pageType(), error: '当前不是搜索结果页。' });
         return false;
       }
-      const items = searchLinkItems();
-      sendResponse({
-        ok: true,
-        items,
+      collectSearchLinksInVisualOrder().then(result => sendResponse({
+        ...result,
         pageUrl: location.href,
         pageTitle: document.title,
         pager: pagerRoots().map(pagerState).find(state => state.current || state.total) || { current: 0, total: 0 }
-      });
-      return false;
+      })).catch(error => sendResponse({
+        ok: false,
+        ready: false,
+        pageType: pageType(),
+        items: [],
+        error: error?.message || String(error)
+      }));
+      return true;
     }
 
     if (message?.type === 'GET_PAGE_SNAPSHOT') {
@@ -1965,33 +2273,33 @@
     }
 
     if (message?.type === 'GET_SELLER_ENTRY') {
-      if (!isDetailPage()) {
+      preparePublicPage('detail', 10).then(prepared => {
+        if (!prepared.ready || !isDetailPage()) {
+          sendResponse({ ok: false, pageType: pageType(), error: prepared.error || '当前不是商品详情页。' });
+          return;
+        }
+        const entry = sellerEntryFromRoot(document.body);
         sendResponse({
-          ok: false,
-          pageType: pageType(),
-          error: '当前不是商品详情页。'
+          ok: true,
+          pageType: 'detail',
+          ...entry,
+          sourcePage: location.href
         });
-        return false;
-      }
-      const entry = sellerEntryFromRoot(document.body);
-      sendResponse({
-        ok: true,
-        pageType: 'detail',
-        ...entry,
-        sourcePage: location.href
-      });
-      return false;
+      }).catch(error => sendResponse({ ok: false, pageType: pageType(), error: error?.message || String(error) }));
+      return true;
     }
 
     if (message?.type === 'GET_ACCOUNT_PROFILE') {
-      if (pageType() !== 'account') {
-        sendResponse({ ok: false, pageType: pageType(), error: '当前不是卖家账号页。' });
-        return false;
-      }
-      const profile = accountProfileFromPage();
-      const { reviews: _reviews, ...summary } = profile;
-      sendResponse(summary);
-      return false;
+      dismissPublicLoginOverlay().then(() => {
+        if (pageType() !== 'account') {
+          sendResponse({ ok: false, pageType: pageType(), error: '当前不是卖家账号页。' });
+          return;
+        }
+        const profile = accountProfileFromPage();
+        const { reviews: _reviews, ...summary } = profile;
+        sendResponse(summary);
+      }).catch(error => sendResponse({ ok: false, pageType: pageType(), error: error?.message || String(error) }));
+      return true;
     }
 
     if (message?.type === 'COLLECT_CURRENT_STORE_PAGE') {

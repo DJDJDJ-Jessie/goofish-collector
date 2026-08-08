@@ -126,9 +126,10 @@
       : '';
     const lastColumn = columnName(headers.length - 1);
     const drawing = options.drawingRelId ? `<drawing r:id="${xmlEscape(options.drawingRelId)}"/>` : '';
+    const selected = options.selected ? ' tabSelected="1"' : '';
 
     return `${XML_HEADER}<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>
+  <sheetViews><sheetView workbookViewId="0"${selected}><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>
   ${cols}
   <sheetData>${rowXml}</sheetData>
   <autoFilter ref="A1:${lastColumn}${allRows.length}"/>
@@ -499,11 +500,15 @@
       ? [
         {
           name: 'xl/worksheets/sheet1.xml',
-          data: sheetXml(storeHeaders, storeRows, [22, 44, 14, 12, 12, 14, 48, 14, 18, 14, 22, 44, 14])
+          data: sheetXml(storeHeaders, storeRows, [22, 44, 14, 12, 12, 14, 48, 14, 18, 14, 22, 44, 14], {
+            selected: reviewRows.length === 0
+          })
         },
         {
           name: 'xl/worksheets/sheet2.xml',
-          data: sheetXml(reviewHeaders, reviewRows, [22, 44, 10, 18, 12, 80, 32, 12, 56, 22])
+          data: sheetXml(reviewHeaders, reviewRows, [22, 44, 10, 18, 12, 80, 32, 12, 56, 22], {
+            selected: reviewRows.length > 0
+          })
         },
         {
           name: 'xl/worksheets/sheet3.xml',
@@ -522,7 +527,8 @@
           name: 'xl/worksheets/sheet1.xml',
           data: sheetXml(mainHeaders, mainRows, [18, 44, 48, 20, 64, 12, 22, 22, 44, 14, 12, 12, 14, 42, 14, 18, 14, 22], {
             rowHeights: mainRowHeights,
-            drawingRelId: mainDrawing ? 'rId1' : ''
+            drawingRelId: mainDrawing ? 'rId1' : '',
+            selected: true
           })
         },
         {
@@ -571,7 +577,7 @@
       },
       {
         name: 'xl/workbook.xml',
-        data: `${XML_HEADER}<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${workbookSheets}</sheets></workbook>`
+        data: `${XML_HEADER}<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView activeTab="${storeOnly && reviewRows.length ? 1 : 0}"/></bookViews><sheets>${workbookSheets}</sheets></workbook>`
       },
       {
         name: 'xl/_rels/workbook.xml.rels',

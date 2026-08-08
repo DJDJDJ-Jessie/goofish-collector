@@ -732,13 +732,26 @@ async function ensureContentReceiver(tabId) {
   }
 }
 
-async function sendCollectionCommand(tabId) {
+async function preparePublicPage(tabId, expectedPageType, options = {}) {
   await ensureContentReceiver(tabId);
+  const result = await sendTabMessage(tabId, {
+    type: 'PREPARE_PUBLIC_PAGE',
+    expectedPageType,
+    maxAttempts: Math.max(3, Number(options.maxAttempts) || 12)
+  }, Math.max(TAB_MESSAGE_TIMEOUT_MS, Number(options.timeoutMs) || 18_000));
+  if (!result?.ok || !result.ready) {
+    throw new Error(result?.error || `闲鱼${expectedPageType || ''}页面尚未稳定加载。`);
+  }
+  return result;
+}
+
+async function sendCollectionCommand(tabId) {
+  await preparePublicPage(tabId, 'detail', { maxAttempts: 14, timeoutMs: 20_000 });
   return sendTabMessage(tabId, { type: 'COLLECT_CURRENT_PAGE', persistToDataCenter: false });
 }
 
 async function sendApiCollectionCommand(tabId) {
-  await ensureContentReceiver(tabId);
+  await preparePublicPage(tabId, 'detail', { maxAttempts: 14, timeoutMs: 20_000 });
   return sendTabMessage(tabId, { type: 'START_API_CAPTURE', persistToDataCenter: false });
 }
 
@@ -840,6 +853,7 @@ function accountProfileSignature(profile) {
 function accountProfileLooksReady(profile) {
   if (!profile?.ok || profile.pageType !== 'account') return false;
   if (!validSellerUrl(profile.sellerUrl)) return false;
+  if (profile.profileScope !== 'account-info-scope') return false;
 
   const sellerName = cleanText(profile.sellerName, 500);
   if (!sellerName || /^(?:登录|请登录|闲鱼用户|用户)$/i.test(sellerName)) return false;
@@ -981,6 +995,7 @@ async function fetchSellerProfile(sellerUrl) {
   const tab = await tabsCreate({ url, active: false });
   try {
     await waitForTabComplete(tab.id);
+    await preparePublicPage(tab.id, 'account', { maxAttempts: 14, timeoutMs: 20_000 });
     const info = await ensureContentReceiver(tab.id);
     if (info?.pageType !== 'account') throw new Error('卖家账号页未正确加载。');
     return await readStableAccountProfile(tab.id);
@@ -999,6 +1014,7 @@ async function fetchSellerProfileInTab(tabId, sellerUrl, returnUrl) {
   try {
     await tabsUpdate(Number(tabId), { url });
     await waitForTabComplete(Number(tabId));
+    await preparePublicPage(Number(tabId), 'account', { maxAttempts: 14, timeoutMs: 20_000 });
     const info = await ensureContentReceiver(Number(tabId));
     if (info?.pageType !== 'account') throw new Error('卖家账号页未正确加载。');
     return await readStableAccountProfile(Number(tabId));
@@ -1008,7 +1024,7 @@ async function fetchSellerProfileInTab(tabId, sellerUrl, returnUrl) {
       try {
         await tabsUpdate(Number(tabId), { url: originalUrl });
         await waitForTabComplete(Number(tabId));
-        await ensureContentReceiver(Number(tabId));
+        await preparePublicPage(Number(tabId), 'detail', { maxAttempts: 14, timeoutMs: 20_000 });
       } catch (_) {
         // 店铺资料已经读到时，不让返回原详情页失败覆盖有效补采集结果。
       }
@@ -1019,6 +1035,7 @@ async function fetchSellerProfileInTab(tabId, sellerUrl, returnUrl) {
 async function discoverSellerEntry(tabId) {
   const numericTabId = Number(tabId);
   if (!Number.isInteger(numericTabId)) return null;
+  await preparePublicPage(numericTabId, 'detail', { maxAttempts: 12, timeoutMs: 18_000 });
   const info = await ensureContentReceiver(numericTabId);
   if (info?.pageType !== 'detail') return null;
   const entry = await sendTabMessage(numericTabId, { type: 'GET_SELLER_ENTRY' });
@@ -1417,7 +1434,7 @@ async function processSearchPage(job) {
     if (pageInfo?.pageType !== 'search') {
       throw new Error(`采集专用标签页当前不是搜索结果页（实际为${pageInfo?.pageType || '未知页面'}）。`);
     }
-    const result = await sendTabMessage(job.tabId, { type: 'GET_SEARCH_LINKS' });
+    const result = await sendTabMessage(job.tabId, { type: 'GET_SEARCH_LINKS' }, 35_000);
     if (!result?.ok) throw new Error(result?.error || '没有收到搜索页商品链接');
 
     const pager = result.pager || {};
