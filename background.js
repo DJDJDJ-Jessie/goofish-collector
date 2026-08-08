@@ -13,6 +13,19 @@ const MAX_STORE_REVIEWS = 1000;
 const MAX_HISTORY = 50;
 const TAB_MESSAGE_TIMEOUT_MS = 12000;
 const JOB_STALE_TIMEOUT_MS = 90000;
+const cancelledJobIds = new Set();
+
+function markJobCancelled(jobId) {
+  if (!jobId) return;
+  cancelledJobIds.add(jobId);
+  while (cancelledJobIds.size > 200) {
+    cancelledJobIds.delete(cancelledJobIds.values().next().value);
+  }
+}
+
+function isJobCancelled(job) {
+  return Boolean(job?.id && cancelledJobIds.has(job.id));
+}
 
 const DEFAULT_SETTINGS = Object.freeze({
   mode: 'rpa',
@@ -427,13 +440,20 @@ async function readJob() {
   return result[JOB_KEY] || null;
 }
 
-async function writeJob(job) {
+async function writeJob(job, options = {}) {
+  if (!options.force && isJobCancelled(job)) return readJob();
   await chrome.storage.local.set({ [JOB_KEY]: job });
   return job;
 }
 
 function jobIsActive(job) {
   return Boolean(job && !['completed', 'stopped', 'failed'].includes(job.status));
+}
+
+async function canContinueJob(job) {
+  if (!job?.id || isJobCancelled(job)) return false;
+  const current = await readJob();
+  return Boolean(current && current.id === job.id && jobIsActive(current));
 }
 
 function jobMessage(job, message) {
@@ -1060,6 +1080,7 @@ function collectedItemForLink(result, link) {
 
 async function prepareSellerEnrichment(job, item, pendingCount) {
   if (job.collectSellerInfo === false) return { kind: 'disabled', job };
+  if (!(await canContinueJob(job))) return { kind: 'cancelled', job: await readJob() };
   let currentItem = sanitizeItem(item || {});
   let sellerUrl = validSellerUrl(currentItem?.sellerUrl || '');
   if (!sellerUrl && job.tabId) {
@@ -1077,6 +1098,7 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
       // 详情页仍在渲染时先保留原结果，后续任务重试会再次发现卖家入口。
     }
   }
+  if (!(await canContinueJob(job))) return { kind: 'cancelled', job: await readJob() };
   if (!sellerUrl) return { kind: 'unavailable', job };
 
   const jobWithSellerEntry = currentItem
@@ -1089,6 +1111,7 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
   const key = sellerProfileKey(sellerUrl);
   const cached = jobWithSellerEntry.sellerProfiles?.[key]
     || (await readStoreProfiles()).find(profile => sellerProfileKey(profile?.sellerUrl || '') === key);
+  if (!(await canContinueJob(job))) return { kind: 'cancelled', job: await readJob() };
   const identity = itemIdentity(currentItem);
   if (cached) {
     const stagedJob = mergeStagedItemWithProfile(jobWithSellerEntry, currentItem, cached);
@@ -1108,8 +1131,11 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
     pendingCount: Math.max(0, Number(pendingCount) || 0),
     sellerRetries: 0
   }, '正在打开卖家账号页，补充店铺简介和公开评价…');
+  if (!(await canContinueJob(job))) return { kind: 'cancelled', job: await readJob() };
   await writeJob(waiting);
+  if (!(await canContinueJob(waiting))) return { kind: 'cancelled', job: await readJob() };
   await tabsUpdate(job.tabId, { url: sellerUrl });
+  if (!(await canContinueJob(waiting))) return { kind: 'cancelled', job: await readJob() };
   return {
     kind: 'scheduled',
     job: await scheduleJob(waiting, 'ready-to-collect', Math.max(1400, Number(job.delayMs) || 1600))
@@ -1117,9 +1143,12 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
 }
 
 async function scheduleJob(job, status, delayMs = 1000) {
+  if (!(await canContinueJob(job))) return readJob();
   const next = jobMessage({ ...job, status }, job.message || '等待下一步');
   await writeJob(next);
+  if (!(await canContinueJob(next))) return readJob();
   await chrome.alarms.clear(JOB_ALARM);
+  if (!(await canContinueJob(next))) return readJob();
   chrome.alarms.create(JOB_ALARM, {
     when: Date.now() + Math.max(250, Number(delayMs) || 1000)
   });
@@ -1151,10 +1180,24 @@ async function notifyJobFinished(job, exportResult = null) {
   }
 }
 
-async function finishJob(job, status, message) {
+async function finishJob(job, status, message, options = {}) {
+  const force = Boolean(options.force);
+  if (!force && isJobCancelled(job)) return readJob();
   await chrome.alarms.clear(JOB_ALARM);
-  const finalJob = jobMessage({ ...job, status }, message);
-  await writeJob(finalJob);
+  const current = await readJob();
+  if (!current || current.id !== job?.id || !jobIsActive(current) || (!force && isJobCancelled(job))) {
+    return current || job;
+  }
+  const finalJob = jobMessage({ ...(force ? current : job), status }, message);
+  const persistedJob = await writeJob(finalJob, { force });
+  if (!force && (isJobCancelled(job) || persistedJob?.id !== job.id || persistedJob?.status !== status)) {
+    return persistedJob || await readJob();
+  }
+
+  if (status === 'stopped' && options.closeTaskTab && Number.isInteger(Number(finalJob.tabId))) {
+    await tabsRemove(Number(finalJob.tabId)).catch(() => {});
+  }
+
   const jobItems = itemsForJob(finalJob, await readItems());
 
   let exportResult = null;
@@ -1196,6 +1239,7 @@ async function finishJob(job, status, message) {
 }
 
 async function advanceLinkJob(job, failureMessage = '') {
+  if (!(await canContinueJob(job))) return readJob();
   const nextIndex = Number(job.index || 0) + 1;
   const failures = [...(job.failures || [])];
   if (failureMessage && job.links?.[job.index]) {
@@ -1224,8 +1268,11 @@ async function advanceLinkJob(job, failureMessage = '') {
       { ...next, status: 'waiting-page' },
       `正在打开第 ${nextIndex + 1}/${job.links.length} 个商品链接…`
     );
+    if (!(await canContinueJob(next))) return readJob();
     await writeJob(waiting);
+    if (!(await canContinueJob(waiting))) return readJob();
     await tabsUpdate(job.tabId, { url: job.links[nextIndex] });
+    if (!(await canContinueJob(waiting))) return readJob();
     return scheduleJob(waiting, 'ready-to-collect', Math.max(1000, Number(job.delayMs) || 1400));
   } catch (error) {
     return advanceLinkJob(next, error.message || String(error));
@@ -1233,6 +1280,7 @@ async function advanceLinkJob(job, failureMessage = '') {
 }
 
 async function processLinkJob(job) {
+  if (!(await canContinueJob(job))) return readJob();
   try {
     const pageInfo = await ensureContentReceiver(job.tabId);
     if (pageInfo?.pageType !== 'detail') {
@@ -1252,12 +1300,14 @@ async function processLinkJob(job) {
     };
     const detailItem = collectedItemForLink(result, { itemUrl: job.links?.[job.index] || '' });
     const enrichment = await prepareSellerEnrichment(next, detailItem, count);
+    if (enrichment.kind === 'cancelled') return enrichment.job;
     if (enrichment.kind === 'scheduled') return enrichment.job;
     return advanceLinkJob({
       ...enrichment.job,
       collected: Number(job.collected || 0) + count
     });
   } catch (error) {
+    if (isJobCancelled(job)) return readJob();
     const retries = Number(job.retries || 0) + 1;
     if (retries <= 2) {
       return scheduleJob({ ...job, retries }, 'ready-to-collect', 1500);
@@ -1343,6 +1393,7 @@ function normalizeSearchJob(job) {
 }
 
 async function navigateSearchJob(job, url, stage, message, delayMs) {
+  if (!(await canContinueJob(job))) return readJob();
   const waiting = jobMessage({
     ...job,
     status: 'waiting-page',
@@ -1352,7 +1403,9 @@ async function navigateSearchJob(job, url, stage, message, delayMs) {
     expectedSearchPage: stage === 'search-page' ? Number(job.expectedSearchPage || 0) : 0
   }, message);
   await writeJob(waiting);
+  if (!(await canContinueJob(waiting))) return readJob();
   await tabsUpdate(job.tabId, { url });
+  if (!(await canContinueJob(waiting))) return readJob();
 
   // tabs.onUpdated 会在页面完成后再次安排任务；这里保留一个兜底闹钟，
   // 避免某些单页导航或插件刚重载时漏掉 onUpdated 事件。
@@ -1429,6 +1482,7 @@ async function advanceSearchDetail(job, count = 0, failureMessage = '') {
 }
 
 async function processSearchPage(job) {
+  if (!(await canContinueJob(job))) return readJob();
   try {
     const pageInfo = await ensureContentReceiver(job.tabId);
     if (pageInfo?.pageType !== 'search') {
@@ -1537,6 +1591,7 @@ async function processSearchPage(job) {
       Math.max(1600, Number(job.delayMs) || 1800)
     );
   } catch (error) {
+    if (isJobCancelled(job)) return readJob();
     const retries = Number(job.retries || 0) + 1;
     if (retries <= 2) {
       return scheduleJob({ ...job, retries }, 'ready-to-collect', 1500);
@@ -1546,6 +1601,7 @@ async function processSearchPage(job) {
 }
 
 async function processSearchDetail(job) {
+  if (!(await canContinueJob(job))) return readJob();
   const currentLink = job.pageLinks?.[job.detailIndex];
   if (!currentLink?.itemUrl) {
     return advanceSearchDetail(job, 0, '详情链接为空');
@@ -1572,9 +1628,11 @@ async function processSearchDetail(job) {
     };
     const detailItem = collectedItemForLink(result, currentLink);
     const enrichment = await prepareSellerEnrichment(next, detailItem, count);
+    if (enrichment.kind === 'cancelled') return enrichment.job;
     if (enrichment.kind === 'scheduled') return enrichment.job;
     return advanceSearchDetail(enrichment.job, count);
   } catch (error) {
+    if (isJobCancelled(job)) return readJob();
     const retries = Number(job.retries || 0) + 1;
     if (retries <= 2) {
       return scheduleJob({ ...job, retries }, 'ready-to-collect', 1500);
@@ -1584,6 +1642,7 @@ async function processSearchDetail(job) {
 }
 
 async function finishPendingSellerStep(job, profile = null, errorMessage = '') {
+  if (!(await canContinueJob(job))) return readJob();
   const pending = job.pendingItem || {};
   const count = Math.max(0, Number(job.pendingCount) || 0);
   let next = {
@@ -1628,12 +1687,14 @@ async function finishPendingSellerStep(job, profile = null, errorMessage = '') {
 }
 
 async function processAccountPage(job) {
+  if (!(await canContinueJob(job))) return readJob();
   try {
     const pageInfo = await ensureContentReceiver(job.tabId);
     if (pageInfo?.pageType !== 'account') throw new Error('当前页面不是卖家账号页。');
     const profile = await readStableAccountProfile(job.tabId);
     return finishPendingSellerStep(job, profile);
   } catch (error) {
+    if (isJobCancelled(job)) return readJob();
     const retries = Number(job.sellerRetries || 0) + 1;
     if (retries <= 2) {
       return scheduleJob({ ...job, sellerRetries: retries }, 'ready-to-collect', 1600);
@@ -1645,6 +1706,7 @@ async function processAccountPage(job) {
 async function processJobAlarm() {
   const rawJob = await readJob();
   if (!rawJob || !jobIsActive(rawJob) || rawJob.status !== 'ready-to-collect') return;
+  if (!(await canContinueJob(rawJob))) return readJob();
 
   const job = normalizeSearchJob(rawJob);
   const collectingMessage = job.stage === 'account-page'
@@ -1652,8 +1714,9 @@ async function processJobAlarm() {
     : job.type === 'search' && job.stage === 'search-page'
       ? '正在读取当前搜索页的商品详情链接…'
       : '正在采集当前商品详情页…';
-  await writeJob(jobMessage({ ...job, status: 'collecting' }, collectingMessage));
   const collecting = { ...job, status: 'collecting' };
+  await writeJob(jobMessage(collecting, collectingMessage));
+  if (!(await canContinueJob(collecting))) return readJob();
   if (job.stage === 'account-page') await processAccountPage(collecting);
   else if (job.type === 'links') await processLinkJob(collecting);
   else if (job.type === 'search' && job.stage === 'detail-page') await processSearchDetail(collecting);
@@ -1690,6 +1753,7 @@ async function startLinksJob(links, delayMs = 1500, mode = 'rpa') {
     updatedAt: new Date().toISOString(),
     message: `已打开采集标签页，共 ${links.length} 个链接。`
   };
+  await writeJob(job);
   return scheduleJob(job, 'ready-to-collect', 1400);
 }
 
@@ -1743,6 +1807,7 @@ async function startSearchJob(startUrl, targetCount, maxPages, delayMs = 1800, m
     updatedAt: new Date().toISOString(),
     message: `已打开搜索采集标签页，目标 ${Math.max(1, Number(targetCount) || 100)} 条。`
   };
+  await writeJob(job);
   return scheduleJob(job, 'ready-to-collect', 1800);
 }
 
@@ -1923,7 +1988,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           committedToDataCenter: true,
           updatedAt: new Date().toISOString(),
           message: `${job.message || '任务完成'} 已加入数据中心商品表。`
-        });
+        }, { force: true });
         return { ok: true, count: incoming.length, added, total: merged.length };
       }
 
@@ -2133,9 +2198,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'STOP_JOB': {
-        const job = await recoverStaleJob(await readJob());
+        const job = await readJob();
         if (!job || !jobIsActive(job)) return { ok: true, job };
-        const stopped = await finishJob(job, 'stopped', '任务已由用户停止。');
+        markJobCancelled(job.id);
+        const stopped = await finishJob(
+          job,
+          'stopped',
+          '任务已由用户停止，采集专用标签页已关闭。',
+          { force: true, closeTaskTab: true }
+        );
         return { ok: true, job: stopped };
       }
 

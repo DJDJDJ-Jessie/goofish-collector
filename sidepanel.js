@@ -899,13 +899,20 @@
   }
 
   async function stopJob() {
+    const button = $('stopJobButton');
+    if (button) {
+      button.disabled = true;
+      button.textContent = '正在停止…';
+    }
+    setStatus('正在停止采集并关闭专用标签页…');
     try {
       const response = await sendRuntime({ type: 'STOP_JOB' });
       if (!response?.ok) throw new Error(response?.error || '停止任务失败');
-      setStatus('任务已停止，已经采集的数据仍保留在本机。', 'success');
+      setStatus('任务已停止，采集专用标签页已关闭；已经采集的数据仍保留在本机。', 'success');
       await refreshJob();
     } catch (error) {
       setStatus(error.message || '停止任务失败。', 'error');
+      await refreshJob().catch(() => {});
     }
   }
 
