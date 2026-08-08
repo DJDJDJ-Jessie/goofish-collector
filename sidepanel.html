@@ -66,7 +66,7 @@
               </button>
               <button class="menu-row" type="button" data-open-screen="store">
                 <span class="row-icon orange">◎</span>
-                <span class="row-copy"><strong>采集当前店铺页</strong><small>读取店铺资料、评价和图片并合成一张综合表</small></span>
+                <span class="row-copy"><strong>采集当前店铺页</strong><small>店铺资料单独一表，评价和图片合并一表</small></span>
                 <span class="row-chevron">›</span>
               </button>
               <button class="menu-row" type="button" data-open-screen="links">
@@ -90,7 +90,7 @@
               </button>
               <button class="menu-row" type="button" data-open-screen="data" data-open-data-tab="stores">
                 <span class="row-icon orange">◎</span>
-                <span class="row-copy"><strong>店铺表</strong><small><span id="homeStoreCount">0</span> 个店铺，导出为店铺综合表</small></span>
+                <span class="row-copy"><strong>店铺表</strong><small><span id="homeStoreCount">0</span> 个店铺，导出资料表和评价综合表</small></span>
                 <span class="row-chevron">›</span>
               </button>
               <button class="menu-row" type="button" data-open-screen="history">
@@ -167,7 +167,7 @@
           <section class="page-intro">
             <span class="intro-label">CURRENT STORE</span>
             <h2>采集当前店铺页</h2>
-            <p>读取店铺公开资料，自动进入评价区域并尽量加载全部公开评价；店铺资料、评价和评价图片会在导出时合并到同一张“店铺综合”表，图片直接嵌入评价对应行。</p>
+            <p>读取店铺公开资料，自动进入评价区域并尽量加载全部公开评价；导出为“店铺资料”和“店铺评价综合”两张表，评价图片直接嵌入对应评价行。</p>
           </section>
 
           <section class="context-card detail-context-card" aria-live="polite">
@@ -183,9 +183,9 @@
           <section class="action-card">
             <button id="storeCollectButton" class="button primary large" type="button">采集当前店铺页</button>
             <button id="storeCommitButton" class="button teal-action large" type="button" disabled>加到数据中心店铺表</button>
-            <button id="storeExportButton" class="button teal-action large" type="button" disabled>立即下载 Excel</button>
+            <button id="storeExportButton" class="button teal-action large" type="button" disabled>立即下载店铺 Excel</button>
             <button id="storeDataButton" class="button outline-action" type="button">查看数据中心店铺表</button>
-            <p id="storeCollectHint" class="helper">采集会在当前标签页内滚动评价区域；结果会先暂存，你可以直接下载，也可以加入数据中心店铺表。</p>
+            <p id="storeCollectHint" class="helper">采集会在当前标签页内滚动评价区域；结果会先暂存，下载文件包含“店铺资料”和“店铺评价综合”两张表。</p>
           </section>
         </section>
 
@@ -248,12 +248,12 @@ https://www.goofish.com/item?id=…"></textarea>
           <section id="dataStoresPanel" class="data-panel is-hidden" role="tabpanel">
             <section class="data-summary-card">
               <div><span>店铺资料</span><strong id="storeCount">0</strong></div>
-              <div><span>评价数据</span><strong>完整独立保存</strong></div>
+              <div><span>评价数据</span><strong>评价与图片合并</strong></div>
               <div><span>评价图片</span><strong class="accent-text">逐张嵌入</strong></div>
             </section>
             <section class="action-card data-actions-card">
-              <button id="storeDataExportButton" class="button teal-action large" type="button" disabled>下载店铺综合表 Excel</button>
-              <p class="helper">店铺资料、全部已读取评价和评价图片合并在“店铺综合”一张表中；不会带入商品链接表。</p>
+              <button id="storeDataExportButton" class="button teal-action large" type="button" disabled>下载店铺资料+评价 Excel</button>
+              <p class="helper">文件固定包含“店铺资料”和“店铺评价综合”两张表；评价图片会嵌入对应评价行，不会带入商品链接表。</p>
             </section>
           </section>
           <section class="action-card data-actions-card data-clear-card">

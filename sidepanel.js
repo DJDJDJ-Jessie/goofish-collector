@@ -38,7 +38,7 @@
   const SCREEN_META = {
     home: { kicker: 'WORKSPACE', title: '闲鱼研究助手', subtitle: '从公开详情页整理同行商品与店铺信息' },
     detail: { kicker: 'CURRENT DETAIL', title: '采集当前详情', subtitle: '读取此刻打开的商品详情页' },
-    store: { kicker: 'CURRENT STORE', title: '采集当前店铺页', subtitle: '读取店铺资料、评价和图片并合成一张综合表' },
+    store: { kicker: 'CURRENT STORE', title: '采集当前店铺页', subtitle: '分别读取店铺资料与店铺评价图片' },
     links: { kicker: 'BATCH INPUT', title: '批量商品链接', subtitle: '自动逐个打开商品详情页' },
     search: { kicker: 'SEARCH CRAWL', title: '搜索跨页采集', subtitle: '按页码推进，并逐个进入详情页' },
     data: { kicker: 'LOCAL DATASET', title: '数据中心', subtitle: '查看记录、下载 Excel 和图片索引' },
@@ -698,7 +698,7 @@
       const reviewCount = Number(result.reviewCount || result.reviewCountLoaded || result.reviews?.length || 0);
       renderStoreStatus('account', currentStoreStatus);
       setStatus(`${hadHistory ? '当前店铺页重新采集完成' : '当前店铺页首次采集完成'}：本次暂存 1 份店铺资料，读取 ${reviewCount} 条公开评价；现在可以直接下载或加入店铺表。`, 'success');
-      $('storeCollectHint').textContent = `本次已读取 ${reviewCount} 条评价，结果已暂存。可以直接点击“立即下载 Excel”，也可以点击“加到数据中心店铺表”；不需要先去数据中心。`;
+      $('storeCollectHint').textContent = `本次已读取 ${reviewCount} 条评价，结果已暂存。下载文件包含“店铺资料”和“店铺评价综合”两张表，评价图片会嵌入对应评价行；可以直接下载，也可以加入数据中心店铺表。`;
     } catch (error) {
       setStatus(error.message || '店铺页采集失败，请刷新账号页后重试。', 'error');
       $('storeCollectHint').textContent = '如果评价区仍在加载，请停留几秒后重试。';
@@ -912,7 +912,7 @@
   async function exportItems(button = $('exportButton')) {
     const isCurrentStoreExport = button.id === 'storeExportButton';
     const isStoreExport = isCurrentStoreExport || button.id === 'storeDataExportButton';
-    const idleLabel = isCurrentStoreExport ? '立即下载 Excel' : button.id === 'storeDataExportButton' ? '下载店铺综合表 Excel' : '下载商品表 Excel';
+    const idleLabel = isCurrentStoreExport ? '立即下载店铺 Excel' : button.id === 'storeDataExportButton' ? '下载店铺资料+评价 Excel' : '下载商品表 Excel';
     button.disabled = true;
     button.textContent = '正在生成 Excel…';
     setStatus('正在下载图片并生成包含真实图片的 Excel…');
@@ -932,9 +932,9 @@
       const result = response.result || {};
       const details = `${result.embedded || 0} 张图片已嵌入${result.failed ? `，${result.failed} 张下载失败` : ''}`;
       if (isStoreExport) {
-        setStatus(`店铺综合 Excel 已下载：${result.storeCount || 0} 个店铺、${result.reviewCount || 0} 条评价已合并到同一张表；${details}。`, result.failed ? '' : 'success');
-        if (isCurrentStoreExport && $('storeCollectHint')) {
-          $('storeCollectHint').textContent = `店铺综合 Excel 已下载：打开“店铺综合”即可同时对照店铺资料、评价和评价图片；本次共 ${result.reviewCount || 0} 条评价、${result.embedded || 0} 张嵌入图片。`;
+      setStatus(`店铺资料和店铺评价 Excel 已下载：${result.storeCount || 0} 个店铺、${result.reviewCount || 0} 条评价；评价图片与评价已合并在同一张表，${details}。`, result.failed ? '' : 'success');
+      if (isCurrentStoreExport && $('storeCollectHint')) {
+          $('storeCollectHint').textContent = `店铺 Excel 已下载：打开“店铺资料”查看店铺字段，打开“店铺评价综合”查看评价和对应图片；本次共 ${result.reviewCount || 0} 条评价、${result.embedded || 0} 张嵌入图片。`;
         }
       } else {
         setStatus(`已下载 ${result.itemCount || 0} 条记录；${details}。`, result.failed ? '' : 'success');
