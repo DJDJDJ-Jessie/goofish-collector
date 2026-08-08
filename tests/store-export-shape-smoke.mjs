@@ -9,33 +9,33 @@ vm.runInContext(source, context);
 
 const imageBytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const profile = {
-  sellerName: '综合测试店铺',
+  sellerName: '\u7efc\u5408\u6d4b\u8bd5\u5e97\u94fa',
   sellerUrl: 'https://www.goofish.com/personal?userId=store-merge-1',
-  sellerLocation: '西安',
+  sellerLocation: '\u897f\u5b89',
   sellerFollowers: '9',
   sellerFollowing: '83',
   sellerProductCount: '22',
   sellerIntro: '12345',
-  storeDuration: '239天',
+  storeDuration: '239\u5929',
   sellerGoodRate: '100%',
   sellerReviewCount: '101',
   collectedAt: '2026-08-08T12:00:00.000Z',
   reviews: [
     {
       reviewIndex: 1,
-      reviewer: '买家1',
-      role: '普通用户',
-      feedback: '评价一',
-      timeIp: '今天 西安',
+      reviewer: '\u4e70\u5bb61',
+      role: '\u666e\u901a\u7528\u6237',
+      feedback: '\u8bc4\u4ef7\u4e00',
+      timeIp: '\u4eca\u5929 \u897f\u5b89',
       images: ['https://img.example/review-1.jpg'],
       collectedAt: '2026-08-08T12:00:01.000Z'
     },
     {
       reviewIndex: 2,
-      reviewer: '买家2',
-      role: '回头客',
-      feedback: '评价二',
-      timeIp: '昨天 成都',
+      reviewer: '\u4e70\u5bb62',
+      role: '\u56de\u5934\u5ba2',
+      feedback: '\u8bc4\u4ef7\u4e8c',
+      timeIp: '\u6628\u5929 \u6210\u90fd',
       images: ['https://img.example/review-2a.jpg', 'https://img.example/review-2b.jpg'],
       collectedAt: '2026-08-08T12:00:02.000Z'
     }
@@ -45,17 +45,17 @@ const reviewAssets = [
   {
     kind: 'review', reviewKey: `${profile.sellerUrl}|review:1`, storeName: profile.sellerName,
     sellerUrl: profile.sellerUrl, reviewIndex: 1, imageIndex: 1, url: profile.reviews[0].images[0],
-    fileName: '综合测试店铺_评价001_图01.jpg', bytes: imageBytes, extension: 'jpg', width: 1, height: 1
+    fileName: '\u7efc\u5408\u6d4b\u8bd5\u5e97\u94fa_\u8bc4\u4ef7001_\u56fe1.jpg', bytes: imageBytes, extension: 'jpg', width: 1, height: 1
   },
   {
     kind: 'review', reviewKey: `${profile.sellerUrl}|review:2`, storeName: profile.sellerName,
     sellerUrl: profile.sellerUrl, reviewIndex: 2, imageIndex: 1, url: profile.reviews[1].images[0],
-    fileName: '综合测试店铺_评价002_图01.jpg', bytes: imageBytes, extension: 'jpg', width: 1, height: 1
+    fileName: '\u7efc\u5408\u6d4b\u8bd5\u5e97\u94fa_\u8bc4\u4ef7002_\u56fe1.jpg', bytes: imageBytes, extension: 'jpg', width: 1, height: 1
   },
   {
     kind: 'review', reviewKey: `${profile.sellerUrl}|review:2`, storeName: profile.sellerName,
     sellerUrl: profile.sellerUrl, reviewIndex: 2, imageIndex: 2, url: profile.reviews[1].images[1],
-    fileName: '综合测试店铺_评价002_图02.jpg', bytes: imageBytes, extension: 'jpg', width: 1, height: 1
+    fileName: '\u7efc\u5408\u6d4b\u8bd5\u5e97\u94fa_\u8bc4\u4ef7002_\u56fe2.jpg', bytes: imageBytes, extension: 'jpg', width: 1, height: 1
   }
 ];
 
@@ -81,30 +81,44 @@ function readStoredZip(input) {
 
 const entries = readStoredZip(bytes);
 const workbookXml = new TextDecoder().decode(entries.get('xl/workbook.xml'));
-const combinedXml = new TextDecoder().decode(entries.get('xl/worksheets/sheet1.xml'));
-const noteXml = new TextDecoder().decode(entries.get('xl/worksheets/sheet2.xml'));
+const profileXml = new TextDecoder().decode(entries.get('xl/worksheets/sheet1.xml'));
+const reviewXml = new TextDecoder().decode(entries.get('xl/worksheets/sheet2.xml'));
 const drawingXml = new TextDecoder().decode(entries.get('xl/drawings/drawing1.xml'));
+const reviewRelsXml = new TextDecoder().decode(entries.get('xl/worksheets/_rels/sheet2.xml.rels'));
 
-if (!workbookXml.includes('name="店铺综合"') || workbookXml.includes('name="店铺评价"') || workbookXml.includes('name="评价图片"')) {
-  throw new Error('store workbook did not collapse data into the combined sheet');
+const expectedSheets = [
+  '\u5e97\u94fa\u8d44\u6599',
+  '\u5e97\u94fa\u8bc4\u4ef7\u7efc\u5408'
+];
+if (!expectedSheets.every(name => workbookXml.includes(`name="${name}"`)) || (workbookXml.match(/<sheet /g) || []).length !== 2) {
+  throw new Error('store workbook should contain exactly profile and review sheets');
 }
-if (!combinedXml.includes('店铺名称') || !combinedXml.includes('评价内容') || !combinedXml.includes('评价图片状态') || !combinedXml.includes('评价图片')) {
-  throw new Error('combined store headers are incomplete');
+if (workbookXml.includes('\u8bf4\u660e') || workbookXml.includes('\u5e97\u94fa\u7efc\u5408')) {
+  throw new Error('store workbook should not keep the old combined or extra notes sheet');
 }
-if (!combinedXml.includes('综合测试店铺') || !combinedXml.includes('评价一') || !combinedXml.includes('评价二')) {
-  throw new Error('profile and review values were not written to the same sheet');
+if (!profileXml.includes('\u5e97\u94fa\u540d\u79f0') || !profileXml.includes('12345') || !profileXml.includes('239\u5929')) {
+  throw new Error('store profile sheet is missing profile values');
 }
-if ((combinedXml.match(/<row /g) || []).length !== 3) {
-  throw new Error('combined sheet should contain one row per review plus a header');
+if (!reviewXml.includes('\u8bc4\u4ef7\u5185\u5bb9') || !reviewXml.includes('\u8bc4\u4ef7\u56fe\u7247\u72b6\u6001') || !reviewXml.includes('\u8bc4\u4ef7\u56fe\u7247')) {
+  throw new Error('store review sheet is missing review/image columns');
 }
-if ((drawingXml.match(/<xdr:oneCellAnchor>/g) || []).length !== 3 || !drawingXml.includes('<xdr:colOff>1095375</xdr:colOff>')) {
-  throw new Error('all review images were not embedded on their corresponding combined row');
+if (!reviewXml.includes('\u8bc4\u4ef7\u4e00') || !reviewXml.includes('\u8bc4\u4ef7\u4e8c') || !reviewXml.includes('\u56fe2.jpg')) {
+  throw new Error('review values and image names were not written to the review sheet');
 }
-if (!noteXml.includes('店铺综合表')) throw new Error('combined export explanation is missing');
+if ((profileXml.match(/<row /g) || []).length !== 2 || (reviewXml.match(/<row /g) || []).length !== 3) {
+  throw new Error('profile sheet should have one profile row and review sheet one row per review');
+}
+if ((drawingXml.match(/<xdr:oneCellAnchor>/g) || []).length !== 3 || !drawingXml.includes('<xdr:col>10</xdr:col>') || !drawingXml.includes('<xdr:colOff>1095375</xdr:colOff>')) {
+  throw new Error('all review images were not embedded on the review sheet rows');
+}
+if (!reviewRelsXml.includes('../drawings/drawing1.xml') || entries.has('xl/worksheets/_rels/sheet1.xml.rels')) {
+  throw new Error('review drawing should be attached only to the review sheet');
+}
 
 console.log(JSON.stringify({
   ok: true,
-  sheets: ['店铺综合', '说明'],
-  combinedRows: 2,
+  sheets: expectedSheets,
+  profileRows: 1,
+  reviewRows: 2,
   embeddedReviewImages: 3
 }));
