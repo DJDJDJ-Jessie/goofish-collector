@@ -162,6 +162,12 @@
     return Number.isFinite(number) && number >= 0 && number <= 100 ? `${match[1]}%` : '';
   }
 
+  function countText(value) {
+    const text = oneLine(value, 160);
+    const match = text.match(/(\d+(?:\.\d+)?\s*(?:万|w)?)/i);
+    return match ? match[1].replace(/\s+/g, '') : '';
+  }
+
   function mergeLocalItem(item) {
     if (!item || !(item.itemId || item.itemUrl || item.title || item.images?.length)) return null;
     const key = itemKey(item);
@@ -216,6 +222,14 @@
       itemId: oneLine(item.itemId || item.id || '', 200),
       title: oneLine(item.title || item.itemTitle || item.name || '', 1000),
       description: cleanText(item.description || item.desc || '', 12000),
+      viewCount: countText(valueToText(
+        item.viewCount ?? item.itemViewCount ?? item.browseCount ?? item.views ?? '',
+        160
+      )),
+      wantCount: countText(valueToText(
+        item.wantCount ?? item.itemWantCount ?? item.wantNum ?? item.wants ?? '',
+        160
+      )),
       price: oneLine(item.price || '', 100),
       category: oneLine(item.category || '', 500),
       images: unique((Array.isArray(item.images) ? item.images : imageUrlsFromValue(item.images))
@@ -281,6 +295,38 @@
     // 详情页价格节点有时只渲染数字，符号单独放在相邻节点中。
     const bare = rawText.match(/(?:^|[^\d])([\d]{1,7}(?:[,.]\d{1,2})?)(?:[^\d]|$)/);
     return bare ? bare[1] : '';
+  }
+
+  function interactionCountsFromRoot(root) {
+    const detailScope = root?.querySelector?.(
+      '[class^="item-main-info"], [class*="item-main-info"], [data-testid*="item-main-info"], [class*="detail-main"], [class*="DetailMain"]'
+    ) || root;
+    const texts = unique([
+      oneLine(detailScope?.textContent || '', 24000),
+      ...textLines(detailScope),
+      ...[...(detailScope?.querySelectorAll?.(
+        '[aria-label*="想要"], [aria-label*="浏览"], [title*="想要"], [title*="浏览"], [class*="want"], [class*="Want"], [class*="browse"], [class*="Browse"], [class*="view"], [class*="View"]'
+      ) || [])].map(node => oneLine(
+        node.getAttribute?.('aria-label') || node.getAttribute?.('title') || node.textContent || '',
+        300
+      ))
+    ].filter(Boolean));
+
+    function readCount(label) {
+      const escapedLabel = label === '想要' ? '想要' : '浏览';
+      const before = new RegExp(`(\\d+(?:\\.\\d+)?\\s*(?:万|w)?)\\s*(?:人|次)?\\s*${escapedLabel}`, 'i');
+      const after = new RegExp(`${escapedLabel}\\s*[:：|｜·•-]?\\s*(\\d+(?:\\.\\d+)?\\s*(?:万|w)?)`, 'i');
+      for (const text of texts) {
+        const match = text.match(before) || text.match(after);
+        if (match) return match[1].replace(/\s+/g, '');
+      }
+      return '';
+    }
+
+    return {
+      viewCount: readCount('浏览'),
+      wantCount: readCount('想要')
+    };
   }
 
   function imageUrlsFromRoot(root, includeSmall = false) {
@@ -1208,10 +1254,13 @@
       ? detailImages
       : imageUrlsFromValue(jsonLd?.image);
     const sellerUrl = sellerUrlFromRoot(root);
+    const interactionCounts = interactionCountsFromRoot(root);
     const item = normalizeItem({
       itemId: extractItemIdFromUrl(itemUrl) || valueToText(jsonLd?.productID, 200),
       title,
       description: descriptionFromRoot(root) || valueToText(jsonLd?.description, 12000),
+      viewCount: interactionCounts.viewCount,
+      wantCount: interactionCounts.wantCount,
       price: priceFromRoot(root) || valueToText(jsonLd?.offers?.price, 100),
       category: serviceTypeFromRoot(root) || categoryFromPage(root),
       images,
@@ -1284,6 +1333,14 @@
         itemUrl,
         sellerName: exContent.userNickName || detailParams.userNick || '',
         sellerLocation: exContent.area || '',
+        viewCount: countText(valueToText(
+          firstDirectValue(clickArgs, ['viewCount', 'browseCount', 'viewNum', 'browseNum', 'pv']),
+          160
+        )),
+        wantCount: countText(valueToText(
+          firstDirectValue(clickArgs, ['wantCount', 'wantNum', 'wishCount', 'wishNum']),
+          160
+        )),
         publishedAt: clickArgs.publishTime || '',
         sourcePage: sourceUrl || location.href
       }, 'network:search');
@@ -1335,6 +1392,12 @@
     const sellerReviewCount = valueToText(firstNestedValue(record, [
       'sellerReviewCount', 'reviewCount', 'evaluationCount', 'creditCount'
     ]), 100);
+    const viewCount = countText(valueToText(firstNestedValue(record, [
+      'viewCount', 'itemViewCount', 'browseCount', 'viewNum', 'browseNum', 'views', 'pv'
+    ]), 160));
+    const wantCount = countText(valueToText(firstNestedValue(record, [
+      'wantCount', 'itemWantCount', 'wantNum', 'wishCount', 'wishNum', 'wants'
+    ]), 160));
     const reviewSamplesValue = firstNestedValue(record, [
       'reviews', 'reviewList', 'commentList', 'evaluationList'
     ]);
@@ -1351,6 +1414,8 @@
       itemId,
       title,
       description,
+      viewCount,
+      wantCount,
       price,
       category,
       images,

@@ -151,6 +151,8 @@
       itemId: item.itemId || '',
       title: item.title || '',
       description: item.description || '',
+      viewCount: item.viewCount || '',
+      wantCount: item.wantCount || '',
       price: item.price || '',
       category: item.category || '',
       images: list(item.images),
@@ -268,8 +270,6 @@
       sellerFollowing: profile?.sellerFollowing || '',
       sellerProductCount: profile?.sellerProductCount || '',
       sellerIntro: intro,
-      storeDuration: profile?.storeDuration || '',
-      sellerGoodRate: rateText(profile?.sellerGoodRate || ''),
       sellerReviewCount: profile?.sellerReviewCount || '',
       sourcePage: profile?.sourcePage || profile?.sellerUrl || '',
       collectedAt: profile?.collectedAt || '',
@@ -358,7 +358,7 @@
     }
 
     const mainHeaders = [
-      '商品ID', '商品链接', '主图文件名', '商品图片', '商品文案', '价格', '类目', '店铺名称',
+      '商品ID', '商品链接', '主图文件名', '商品图片', '商品文案', '浏览数', '想要数', '价格', '类目', '店铺名称',
       '卖家账号页', '卖家地区', '粉丝数', '关注数', '卖家商品数', '店铺简介', '开店时长', '商品好评率',
       '店铺评价数', '采集时间'
     ];
@@ -374,7 +374,7 @@
       const reviewCount = item.sellerReviewCount || (item.sellerReviewSummary.match(/\d+/)?.[0] || '');
       mainRows.push([
         item.itemId, item.itemUrl, statusFileName,
-        '', item.description, item.price, item.category, item.sellerName,
+        '', item.description, item.viewCount, item.wantCount, item.price, item.category, item.sellerName,
         item.sellerUrl, item.sellerLocation, item.sellerFollowers, item.sellerFollowing, item.sellerProductCount,
         item.sellerIntro, item.storeDuration, item.itemGoodRate, reviewCount, item.collectedAt
       ]);
@@ -420,13 +420,13 @@
     // 1) “店铺资料”一店一行；2) “店铺评价综合”一条评价一行，评价图片与评价保持同一行。
     // 内部仍按 profile/reviews/assets 分开保存，避免影响去重和增量更新。
     const storeProfileHeaders = [
-      '店铺名称', '卖家账号页', '卖家地区', '粉丝数', '关注数', '卖家商品数', '店铺简介', '开店时长',
-      '商品好评率', '店铺评价数', '采集时间', '来源页面', '已采集评价数'
+      '店铺名称', '卖家账号页', '卖家地区', '粉丝数', '关注数', '卖家商品数', '店铺简介',
+      '店铺评价数', '采集时间', '来源页面', '已采集评价数'
     ];
     const storeProfileRows = safeProfiles.map(profile => [
       profile.sellerName, profile.sellerUrl, profile.sellerLocation, profile.sellerFollowers,
-      profile.sellerFollowing, profile.sellerProductCount, profile.sellerIntro, profile.storeDuration,
-      profile.sellerGoodRate, profile.sellerReviewCount, profile.collectedAt, profile.sourcePage,
+      profile.sellerFollowing, profile.sellerProductCount, profile.sellerIntro,
+      profile.sellerReviewCount, profile.collectedAt, profile.sourcePage,
       profile.reviews.length
     ]);
     const storeReviewHeaders = [
@@ -479,9 +479,9 @@
 
     const notes = [
       ['项目', '说明'],
-      ['商品主表', '商品主表按需求固定为 18 列：商品 ID、链接、主图文件名、真实嵌入图片、商品文案、价格、类目、店铺资料、商品好评率、店铺评价数和采集时间。'],
+      ['商品主表', '商品主表按需求固定为 20 列：商品 ID、链接、主图文件名、真实嵌入图片、商品文案、浏览数、想要数、价格、类目、店铺资料、商品好评率、店铺评价数和采集时间。'],
       ['图片处理', '导出时会下载图片并将真实图片二进制嵌入 Excel；商品图片上限只限制商品图，已读取的评价图片会单独处理；店铺评价综合表中的评价图片与评价文本保持同一行，不把 URL 当作图片本身。'],
-      ['店铺表', '店铺资料单独放在“店铺资料”表，一店一行；店铺评价和评价图片放在“店铺评价综合”表，一条评价一行。评价图片文件名、图片状态、失败地址和真实图片都在对应评价行；没有公开评价时，店铺资料表仍保留该店铺。'],
+      ['店铺表', '店铺资料单独放在“店铺资料”表，一店一行；店铺页无法可靠提供开店时长和商品好评率，因此店铺资料表不再生成这两个字段。店铺评价和评价图片放在“店铺评价综合”表，一条评价一行。'],
       ['类目说明', '服务类商品优先使用详情属性区的“服务类型”（例如“金融”）作为类目；如果页面没有服务类型，再使用可见面包屑；只有 URL 内部 categoryId 而没有公开名称时留空，不编造类目名称。'],
       ['图片文件名', '商品图片格式为“商品标题_店铺名_商品ID_图序号.扩展名”；评价图片格式为“店铺名_评价序号_图序号.扩展名”。'],
       ['下载失败', '如果图片 CDN 拒绝扩展程序访问，会在对应状态列标出错误；成功下载的图片不会退回成只保留链接。'],
@@ -515,7 +515,7 @@
       ? [
         {
           name: 'xl/worksheets/sheet1.xml',
-          data: sheetXml(storeProfileHeaders, storeProfileRows, [22, 44, 14, 12, 12, 14, 48, 14, 18, 14, 22, 44, 14], {
+          data: sheetXml(storeProfileHeaders, storeProfileRows, [22, 44, 14, 12, 12, 14, 48, 14, 22, 44, 14], {
             selected: true
           })
         },
@@ -530,7 +530,7 @@
       : [
         {
           name: 'xl/worksheets/sheet1.xml',
-          data: sheetXml(mainHeaders, mainRows, [18, 44, 48, 20, 64, 12, 22, 22, 44, 14, 12, 12, 14, 42, 14, 18, 14, 22], {
+          data: sheetXml(mainHeaders, mainRows, [18, 44, 48, 20, 64, 12, 12, 12, 22, 22, 44, 14, 12, 12, 14, 42, 14, 18, 14, 22], {
             rowHeights: mainRowHeights,
             drawingRelId: mainDrawing ? 'rId1' : '',
             selected: true

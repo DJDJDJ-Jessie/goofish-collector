@@ -45,6 +45,8 @@ const ALLOWED_FIELDS = [
   'itemId',
   'title',
   'description',
+  'viewCount',
+  'wantCount',
   'price',
   'category',
   'images',
@@ -245,8 +247,9 @@ function sanitizeReview(input) {
   return review.feedback || review.reviewer || review.images.length ? review : null;
 }
 
-function sanitizeStoreProfile(input, sourcePage = '') {
+function sanitizeStoreProfile(input, sourcePage = '', options = {}) {
   if (!input || typeof input !== 'object') return null;
+  const includeProductOnlyFields = options.forProduct === true;
   const sellerUrl = validSellerUrl(input.sellerUrl || '') || cleanUrl(input.sellerUrl || '');
   const reviews = (Array.isArray(input.reviews) ? input.reviews : [])
     .map(sanitizeReview)
@@ -260,14 +263,18 @@ function sanitizeStoreProfile(input, sourcePage = '') {
     sellerFollowing: cleanText(input.sellerFollowing || '', 100),
     sellerProductCount: cleanText(input.sellerProductCount || '', 100),
     sellerIntro: publicIntroText(input.sellerIntro || '', 4000),
-    storeDuration: cleanText(input.storeDuration || '', 300),
-    sellerGoodRate: rateText(input.sellerGoodRate || input.goodRate || ''),
     sellerReviewCount: cleanText(input.sellerReviewCount || input.reviewCount || '', 100),
     reviews,
     reviewCountLoaded: reviews.length,
     sourcePage: cleanUrl(input.sourcePage || sourcePage),
     collectedAt: cleanText(input.collectedAt || input.capturedAt || '', 80) || new Date().toISOString()
   };
+  // 开店时长和好评率只在“商品详情补充店铺字段”时作为商品字段使用。
+  // 店铺页本身不提供可靠的这两个字段，不能把账号页/评价数量推算值写进店铺资料表。
+  if (includeProductOnlyFields) {
+    profile.storeDuration = cleanText(input.storeDuration || '', 300);
+    profile.sellerGoodRate = rateText(input.sellerGoodRate || input.goodRate || '');
+  }
   return profile.sellerUrl || profile.sellerName || profile.reviews.length ? profile : null;
 }
 
@@ -2055,7 +2062,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           : await fetchSellerProfile(sellerUrl);
         // 商品任务只补基础店铺字段；完整评价和评价图片必须由“采集当前店铺页”加载，
         // 防止把账号页首屏的少量评价误报为完整店铺评价。
-        const profileForProduct = sanitizeStoreProfile({ ...profile, reviews: [] }, sellerUrl);
+        const profileForProduct = sanitizeStoreProfile(
+          { ...profile, reviews: [] },
+          sellerUrl,
+          { forProduct: true }
+        );
         const enrichedItem = applyProfileToItem(item, profileForProduct || profile);
         return { ok: true, enriched: Boolean(enrichedItem), item: enrichedItem, profile: profileForProduct || profile };
       }
@@ -2081,8 +2092,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sellerName: profile.sellerName,
             sellerUrl: profile.sellerUrl,
             reviewCount: Number(profile.reviewCountLoaded || profile.reviews?.length || 0),
-            collectedAt: profile.collectedAt,
-            sellerGoodRate: profile.sellerGoodRate || ''
+            collectedAt: profile.collectedAt
           } : null
         };
       }

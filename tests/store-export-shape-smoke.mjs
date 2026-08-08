@@ -96,8 +96,12 @@ if (!expectedSheets.every(name => workbookXml.includes(`name="${name}"`)) || (wo
 if (workbookXml.includes('\u8bf4\u660e') || workbookXml.includes('\u5e97\u94fa\u7efc\u5408')) {
   throw new Error('store workbook should not keep the old combined or extra notes sheet');
 }
-if (!profileXml.includes('\u5e97\u94fa\u540d\u79f0') || !profileXml.includes('12345') || !profileXml.includes('239\u5929')) {
+if (!profileXml.includes('\u5e97\u94fa\u540d\u79f0') || !profileXml.includes('12345')) {
   throw new Error('store profile sheet is missing profile values');
+}
+if (profileXml.includes('\u5f00\u5e97\u65f6\u957f') || profileXml.includes('\u5546\u54c1\u597d\u8bc4\u7387')
+  || profileXml.includes('239\u5929') || profileXml.includes('100%')) {
+  throw new Error('store profile sheet must not export product-only duration or fabricated good-rate fields');
 }
 if (!reviewXml.includes('\u8bc4\u4ef7\u5185\u5bb9') || !reviewXml.includes('\u8bc4\u4ef7\u56fe\u7247\u72b6\u6001') || !reviewXml.includes('\u8bc4\u4ef7\u56fe\u7247')) {
   throw new Error('store review sheet is missing review/image columns');
