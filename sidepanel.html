@@ -334,6 +334,13 @@ https://www.goofish.com/item?id=…"></textarea>
 
             <div class="task-filter"><span class="filter-icon">⌕</span><span id="taskFilterText">当前未进行任何筛选</span><span class="filter-chip">全部数据</span></div>
 
+            <section id="taskFailureCard" class="task-failure-card" hidden>
+              <div class="task-failure-heading"><strong>未成功链接</strong><span id="taskFailureCount">0</span></div>
+              <p class="task-failure-note">详情页失败和店铺资料补充失败都会记录在这里，不会悄悄跳过。</p>
+              <div id="taskFailureList" class="task-failure-list"></div>
+              <button id="copyFailedLinksButton" class="button outline-action" type="button">复制失败链接</button>
+            </section>
+
             <div class="task-actions">
               <button id="stopJobButton" class="button outline-action" type="button" disabled>停止任务</button>
               <button id="taskCommitButton" class="button teal-action large" type="button" disabled>加到数据中心商品表</button>

@@ -442,7 +442,7 @@
   }
 
   function jobIsActive(job) {
-    return Boolean(job && !['completed', 'stopped', 'failed'].includes(job.status));
+    return Boolean(job && !['completed', 'partial', 'stopped', 'failed'].includes(job.status));
   }
 
   function jobProgress(job) {
@@ -453,6 +453,41 @@
     }
     const total = Math.max(1, Number(job.targetCount || 0));
     return Math.min(100, Math.round((Number(job.visited || 0) / total) * 100));
+  }
+
+  function jobFailureRecords(job) {
+    if (Array.isArray(job?.failureRecords)) return job.failureRecords;
+    return [
+      ...(Array.isArray(job?.failures) ? job.failures.map(entry => ({ ...entry, stage: entry.stage || 'detail-page' })) : []),
+      ...(Array.isArray(job?.sellerFailures) ? job.sellerFailures.map(entry => ({ ...entry, stage: entry.stage || 'seller-profile', url: entry.url || entry.itemUrl || '' })) : []),
+      ...(Array.isArray(job?.qualityWarnings) ? job.qualityWarnings.map(entry => ({ ...entry, stage: entry.stage || 'field-quality', url: entry.url || entry.itemUrl || '' })) : [])
+    ];
+  }
+
+  function renderTaskFailures(job) {
+    const card = $('taskFailureCard');
+    const list = $('taskFailureList');
+    const count = $('taskFailureCount');
+    if (!card || !list || !count) return;
+    const records = jobFailureRecords(job);
+    card.hidden = !records.length;
+    count.textContent = String(records.length);
+    list.replaceChildren();
+    for (const record of records.slice(0, 100)) {
+      const entry = document.createElement('div');
+      entry.className = 'task-failure-entry';
+      const stage = document.createElement('strong');
+      stage.textContent = record.stage === 'seller-profile'
+        ? '店铺资料补充失败'
+        : record.stage === 'field-quality' ? '字段待补充' : '商品详情采集失败';
+      const target = document.createElement('span');
+      target.textContent = record.url || record.sellerUrl || record.itemId || '未提供链接';
+      target.title = target.textContent;
+      const error = document.createElement('em');
+      error.textContent = record.error || '未提供失败原因';
+      entry.append(stage, target, error);
+      list.append(entry);
+    }
   }
 
   function renderJob(job) {
@@ -476,6 +511,7 @@
       $('taskCreatedText').textContent = '—';
       $('taskStateText').textContent = '—';
       $('taskFilterText').textContent = '当前未进行任何筛选';
+      renderTaskFailures(null);
       $('homeTaskHint').textContent = '查看当前任务进度和完成结果';
       $('stopJobButton').disabled = true;
       $('stopJobButton').textContent = '停止任务';
@@ -491,13 +527,13 @@
     }
 
     const typeText = job.type === 'links' ? '链接批量' : '搜索跨页';
-    const stateText = active ? '正在处理' : job.status === 'completed' ? '处理完成' : job.status === 'stopped' ? '已停止' : '处理失败';
+    const stateText = active ? '正在处理' : job.status === 'completed' ? '处理完成' : job.status === 'partial' ? '部分完成' : job.status === 'stopped' ? '已停止' : '处理失败';
     const percent = jobProgress(job);
     $('jobBadge').textContent = `${typeText} · ${job.mode === 'api' ? 'API 模式' : '详情模式'}`;
     $('jobHeadline').textContent = stateText;
     $('jobProgressText').textContent = `${percent}%`;
     $('progressRing').style.setProperty('--progress', `${percent}%`);
-    $('progressRing').style.setProperty('--ring-color', job.status === 'completed' ? 'var(--green)' : job.status === 'failed' ? 'var(--danger)' : 'var(--blue)');
+    $('progressRing').style.setProperty('--ring-color', job.status === 'completed' ? 'var(--green)' : job.status === 'partial' ? '#d39b32' : job.status === 'failed' ? 'var(--danger)' : 'var(--blue)');
     $('stopJobButton').disabled = !active;
     $('stopJobButton').textContent = active ? '停止任务' : '任务已结束';
     const stagedCount = Array.isArray(job.stagedItems) ? job.stagedItems.length : Number(job.collected || 0);
@@ -517,13 +553,15 @@
       : `详情页 ${job.visited || 0}/${job.targetCount || 0}，成功 ${job.collected || 0} 条，搜索页 ${job.pagesProcessed || 0}/${job.maxPages || 0}`;
     const failures = job.failures?.length ? `，失败 ${job.failures.length} 个` : '';
     const sellerFailures = job.sellerFailures?.length ? `，店铺资料失败 ${job.sellerFailures.length} 个` : '';
-    $('jobStatus').textContent = `${job.message || '任务处理中'}（${progress}${failures}${sellerFailures}）`;
+    const qualityWarnings = job.qualityWarnings?.length ? `，字段待补充 ${job.qualityWarnings.length} 个` : '';
+    $('jobStatus').textContent = `${job.message || '任务处理中'}（${progress}${failures}${sellerFailures}${qualityWarnings}）`;
     $('taskCountText').textContent = progress;
     $('taskModeText').textContent = job.mode === 'api' ? 'API 模式' : '页面详情模式';
     $('taskTypeText').textContent = job.type === 'links' ? `商品详情 · ${job.links?.length || 0} 个` : `搜索详情 · ${job.targetCount || 0} 条`;
     $('taskCreatedText').textContent = formatDate(job.createdAt);
     $('taskStateText').textContent = stateText;
-    $('taskFilterText').textContent = failures || sellerFailures ? `已记录${failures}${sellerFailures}` : '当前未进行任何筛选';
+    renderTaskFailures(job);
+    $('taskFilterText').textContent = failures || sellerFailures || qualityWarnings ? `已记录${failures}${sellerFailures}${qualityWarnings}` : '当前未进行任何筛选';
     $('homeTaskHint').textContent = `${stateText} · ${job.collected || 0} 条成功记录`;
     $('currentState').textContent = active ? '任务运行中' : stateText;
     setPageButtons(Boolean(activeTab && isGoofishUrl(activeTab.url || '')));
@@ -536,7 +574,7 @@
     const terminalKey = `${job.id}:${job.status}:${job.updatedAt}:${job.autoExportStatus || ''}:${job.committedToDataCenter ? 'committed' : ''}`;
     if (!active && terminalKey !== lastTerminalKey) {
       lastTerminalKey = terminalKey;
-      const kind = job.status === 'completed' ? 'success' : job.status === 'failed' ? 'error' : '';
+      const kind = ['completed', 'partial'].includes(job.status) ? 'success' : job.status === 'failed' ? 'error' : '';
       setStatus(job.message || `任务${stateText}。`, kind);
       void refreshCount().catch(() => {});
       void refreshHistory().catch(() => {});
@@ -916,6 +954,32 @@
     }
   }
 
+  async function copyFailedLinks() {
+    const records = jobFailureRecords(currentTaskJob);
+    const links = [...new Set(records
+      .map(record => record.url || record.itemUrl || '')
+      .filter(Boolean))];
+    if (!links.length) {
+      setStatus('当前任务没有可复制的失败链接。', 'warning');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(links.join('\n'));
+      setStatus(`已复制 ${links.length} 个失败链接，可以直接粘贴到批量采集。`, 'success');
+    } catch (_) {
+      const textarea = document.createElement('textarea');
+      textarea.value = links.join('\n');
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.append(textarea);
+      textarea.select();
+      const copied = document.execCommand('copy');
+      textarea.remove();
+      if (!copied) throw new Error('浏览器拒绝访问剪贴板，请展开失败列表手动复制。');
+      setStatus(`已复制 ${links.length} 个失败链接，可以直接粘贴到批量采集。`, 'success');
+    }
+  }
+
   async function exportItems(button = $('exportButton')) {
     const isCurrentStoreExport = button.id === 'storeExportButton';
     const isStoreExport = isCurrentStoreExport || button.id === 'storeDataExportButton';
@@ -1047,11 +1111,11 @@
       heading.textContent = `${historyType(entry)} · ${entry.mode === 'api' ? '接口观察' : '页面详情'}`;
       const status = document.createElement('span');
       status.className = 'summary-state';
-      status.textContent = entry.status === 'completed' ? '完成' : entry.status === 'stopped' ? '停止' : '失败';
+      status.textContent = entry.status === 'completed' ? '完成' : entry.status === 'partial' ? '部分完成' : entry.status === 'stopped' ? '停止' : '失败';
       title.append(heading, status);
       const meta = document.createElement('p');
       meta.className = 'history-meta';
-      meta.textContent = `${formatDate(entry.completedAt)} · 成功 ${entry.collected || 0} 条 · 失败 ${(entry.failures || []).length} 条`;
+      meta.textContent = `${formatDate(entry.completedAt)} · 成功 ${entry.collected || 0} 条 · 未完成 ${((entry.failures || []).length + (entry.sellerFailures || []).length + (entry.qualityWarnings || []).length)} 条`;
       const actions = document.createElement('div');
       actions.className = 'history-actions';
       const exportButton = document.createElement('button');
@@ -1156,6 +1220,7 @@
     $('batchLinkButton').addEventListener('click', () => startLinkBatch());
     $('searchCrawlButton').addEventListener('click', () => startSearchCrawl());
     $('stopJobButton').addEventListener('click', () => stopJob());
+    $('copyFailedLinksButton')?.addEventListener('click', () => copyFailedLinks().catch(error => setStatus(error.message, 'error')));
     $('exportButton').addEventListener('click', () => exportItems($('exportButton')).catch(error => setStatus(error.message, 'error')));
     $('storeDataExportButton').addEventListener('click', () => exportItems($('storeDataExportButton')).catch(error => setStatus(error.message, 'error')));
     $('taskExportButton').addEventListener('click', () => exportTaskResult().catch(error => setStatus(error.message, 'error')));

@@ -113,7 +113,7 @@ const context = vm.createContext({
 
 const source = fs.readFileSync(new URL('../background.js', import.meta.url), 'utf8');
 vm.runInContext(
-  `${source}\n;globalThis.__stopTestApi = { scheduleJob, processJobAlarm };`,
+  `${source}\n;globalThis.__stopTestApi = { scheduleJob, processJobAlarm, jobFailureRecords, terminalStatus };`,
   context
 );
 
@@ -163,6 +163,17 @@ assert.equal(createdAlarms.length, 0, 'a stopped task must not recreate its alar
 
 await context.__stopTestApi.processJobAlarm();
 assert.equal(createdAlarms.length, 0, 'a stopped task must not resume from an alarm');
+
+const partialJob = {
+  ...activeJob,
+  status: 'completed',
+  collected: 2,
+  failures: [{ url: 'https://www.goofish.com/item?id=1', error: '详情页加载失败' }],
+  sellerFailures: [{ url: 'https://www.goofish.com/item?id=2', error: '未识别卖家页' }],
+  qualityWarnings: [{ url: 'https://www.goofish.com/item?id=3', fields: ['类目'], error: '字段待补充：类目' }]
+};
+assert.equal(context.__stopTestApi.jobFailureRecords(partialJob).length, 3, 'detail, seller and field failures must be reported together');
+assert.equal(context.__stopTestApi.terminalStatus('completed', partialJob), 'partial', 'a completed task with failed links must be marked partial');
 
 console.log(JSON.stringify({
   ok: true,

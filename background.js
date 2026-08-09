@@ -87,6 +87,28 @@ function rateText(value) {
   return Number.isFinite(number) && number >= 0 && number <= 100 ? `${match[1]}%` : '';
 }
 
+function interactionCount(value) {
+  // 浏览/想要数来自页面展示或公开接口时，来源格式并不统一：
+  // “2人想要”“5.5万浏览”是合法展示值，而“55.00827”通常是接口里的
+  // 比例/内部计算字段，不是用户数。只接受带单位的紧凑展示值或整数，
+  // 并统一输出为整数文本，避免错误数字覆盖页面已读到的真实计数。
+  const text = cleanText(value, 160).replace(/\s+/g, '');
+  if (!text) return '';
+
+  const compact = text.match(/(?:^|[^\d])([\d,]+(?:\.\d+)?)(万|w)(?:人|次|个|条)?/i);
+  if (compact) {
+    const number = Number(compact[1].replace(/,/g, ''));
+    if (Number.isFinite(number) && number >= 0) return String(Math.round(number * 10000));
+  }
+
+  // 直接出现小数但没有“万/w”单位时拒绝；这一步是修复 55.00827、
+  // 52.50106、245.00204 进入“想要数”的关键。
+  if (/\d[\d,]*\.\d+/.test(text)) return '';
+  const integer = text.match(/(?:^|[^\d])(\d[\d,]*)(?:人|次|个|条|浏览|想要|收藏)?(?:$|[^\d])/);
+  if (!integer) return '';
+  return integer[1].replace(/,/g, '');
+}
+
 function publicIntroText(value, maxLength = 4000) {
   // 简介是用户自定义文本，纯数字也可能是合法简介；是否为简介必须由页面语义位置决定。
   return cleanText(value, maxLength);
@@ -123,6 +145,8 @@ function sanitizeItem(input, sourcePage = '') {
   if (!item.sourcePage && sourcePage) item.sourcePage = cleanUrl(sourcePage);
   if (!item.collectedAt) item.collectedAt = new Date().toISOString();
   if (!item.dataSource) item.dataSource = 'dom';
+  if ('viewCount' in item) item.viewCount = interactionCount(item.viewCount);
+  if ('wantCount' in item) item.wantCount = interactionCount(item.wantCount);
   // 兼容旧版本已经保存的内部类目编号：导出前自动清掉，避免用户必须先手动清空全部数据。
   if (isInternalCategory(item.category)) item.category = '';
   item.itemGoodRate = rateText(item.itemGoodRate || item.goodRate || item.reviewSummary || '');
@@ -163,6 +187,11 @@ function mergeItemValues(old, item) {
         // 当前 DOM 明确没有公开类目名称时，不把接口里的内部 categoryId 导出为类目。
         merged.category = '';
       }
+      continue;
+    }
+    if (field === 'viewCount' || field === 'wantCount') {
+      const count = interactionCount(value);
+      if (count) merged[field] = count;
       continue;
     }
     // 异步接口或二次 DOM 扫描的空值不能覆盖已经成功识别的字段。
@@ -404,6 +433,9 @@ function historySummary(job, items, extra = {}) {
     visited: Number(job.visited || 0),
     collected: Number(job.collected || 0),
     failures: Array.isArray(job.failures) ? job.failures.slice(0, 100) : [],
+    sellerFailures: Array.isArray(job.sellerFailures) ? job.sellerFailures.slice(0, 100) : [],
+    qualityWarnings: Array.isArray(job.qualityWarnings) ? job.qualityWarnings.slice(0, 100) : [],
+    failureRecords: jobFailureRecords(job),
     autoExportStatus: extra.autoExportStatus || '',
     fileName: extra.fileName || '',
     itemCount: Array.isArray(snapshot) ? snapshot.length : 0,
@@ -454,7 +486,79 @@ async function writeJob(job, options = {}) {
 }
 
 function jobIsActive(job) {
-  return Boolean(job && !['completed', 'stopped', 'failed'].includes(job.status));
+  return Boolean(job && !['completed', 'partial', 'stopped', 'failed'].includes(job.status));
+}
+
+function jobFailureRecords(job) {
+  const detailFailures = (Array.isArray(job?.failures) ? job.failures : [])
+    .map(entry => ({
+      stage: entry?.stage || 'detail-page',
+      url: cleanUrl(entry?.url || ''),
+      itemId: cleanText(entry?.itemId || '', 200),
+      error: cleanText(entry?.error || '详情页采集失败', 500)
+    }))
+    .filter(entry => entry.url || entry.itemId || entry.error);
+  const sellerFailures = (Array.isArray(job?.sellerFailures) ? job.sellerFailures : [])
+    .map(entry => ({
+      stage: entry?.stage || 'seller-profile',
+      url: cleanUrl(entry?.url || entry?.itemUrl || ''),
+      itemId: cleanText(entry?.itemId || '', 200),
+      sellerUrl: validSellerUrl(entry?.sellerUrl || '') || cleanUrl(entry?.sellerUrl || ''),
+      error: cleanText(entry?.error || '店铺资料补充失败', 500)
+    }))
+    .filter(entry => entry.url || entry.itemId || entry.sellerUrl || entry.error);
+  const qualityWarnings = (Array.isArray(job?.qualityWarnings) ? job.qualityWarnings : [])
+    .map(entry => ({
+      stage: entry?.stage || 'field-quality',
+      url: cleanUrl(entry?.url || entry?.itemUrl || ''),
+      itemId: cleanText(entry?.itemId || '', 200),
+      error: cleanText(entry?.error || `字段待补充：${(entry?.fields || []).join('、')}`, 500),
+      fields: Array.isArray(entry?.fields) ? entry.fields.slice(0, 20) : []
+    }))
+    .filter(entry => entry.url || entry.itemId || entry.error);
+  const seen = new Set();
+  return [...detailFailures, ...sellerFailures, ...qualityWarnings].filter(entry => {
+    const key = `${entry.stage}|${entry.url}|${entry.itemId}|${entry.sellerUrl}|${entry.error}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 200);
+}
+
+function missingProductFields(item) {
+  if (!item) return [];
+  const missing = [];
+  if (!cleanText(item.itemId || item.itemUrl, 200)) missing.push('商品ID/链接');
+  if (!cleanText(item.description, 12000)) missing.push('商品文案');
+  if (!cleanText(item.price, 100)) missing.push('价格');
+  if (!cleanText(item.category, 500)) missing.push('类目');
+  if (!Array.isArray(item.images) || !item.images.length) missing.push('商品图片');
+  if (!cleanText(item.sellerName, 500)) missing.push('店铺名称');
+  if (!validSellerUrl(item.sellerUrl || '')) missing.push('卖家账号页');
+  return missing;
+}
+
+function appendQualityWarning(job, item) {
+  const fields = missingProductFields(item);
+  if (!fields.length) return job;
+  const warning = {
+    stage: 'field-quality',
+    url: cleanUrl(item?.itemUrl || ''),
+    itemId: cleanText(item?.itemId || '', 200),
+    fields,
+    error: `商品详情仍有字段待补充：${fields.join('、')}`
+  };
+  const signature = `${warning.url}|${warning.itemId}|${fields.join(',')}`;
+  const previous = Array.isArray(job.qualityWarnings) ? job.qualityWarnings : [];
+  if (previous.some(entry => `${entry?.url || entry?.itemUrl || ''}|${entry?.itemId || ''}|${(entry?.fields || []).join(',')}` === signature)) return job;
+  return { ...job, qualityWarnings: [...previous, warning].slice(-100) };
+}
+
+function terminalStatus(status, job) {
+  if (status !== 'completed') return status;
+  const hasFailures = jobFailureRecords(job).length > 0;
+  if (!hasFailures) return 'completed';
+  return Number(job?.collected || 0) > 0 ? 'partial' : 'failed';
 }
 
 async function canContinueJob(job) {
@@ -1065,13 +1169,14 @@ async function discoverSellerEntry(tabId) {
   await preparePublicPage(numericTabId, 'detail', { maxAttempts: 12, timeoutMs: 18_000 });
   const info = await ensureContentReceiver(numericTabId);
   if (info?.pageType !== 'detail') return null;
-  const entry = await sendTabMessage(numericTabId, { type: 'GET_SELLER_ENTRY' });
-  const sellerUrl = validSellerUrl(entry?.sellerUrl || '');
-  if (!sellerUrl) return null;
-  return {
-    ...entry,
-    sellerUrl
-  };
+  let lastEntry = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    lastEntry = await sendTabMessage(numericTabId, { type: 'GET_SELLER_ENTRY' }).catch(() => null);
+    const sellerUrl = validSellerUrl(lastEntry?.sellerUrl || '');
+    if (sellerUrl) return { ...lastEntry, sellerUrl };
+    if (attempt < 3) await waitMs(700 + attempt * 350);
+  }
+  return null;
 }
 
 function collectedItemForLink(result, link) {
@@ -1086,7 +1191,7 @@ function collectedItemForLink(result, link) {
 }
 
 async function prepareSellerEnrichment(job, item, pendingCount) {
-  if (job.collectSellerInfo === false) return { kind: 'disabled', job };
+  if (job.collectSellerInfo === false) return { kind: 'disabled', job: appendQualityWarning(job, item) };
   if (!(await canContinueJob(job))) return { kind: 'cancelled', job: await readJob() };
   let currentItem = sanitizeItem(item || {});
   let sellerUrl = validSellerUrl(currentItem?.sellerUrl || '');
@@ -1106,7 +1211,27 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
     }
   }
   if (!(await canContinueJob(job))) return { kind: 'cancelled', job: await readJob() };
-  if (!sellerUrl) return { kind: 'unavailable', job };
+  if (!sellerUrl) {
+    const currentLink = job.type === 'links'
+      ? job.links?.[job.index]
+      : job.pageLinks?.[job.detailIndex];
+    return {
+      kind: 'unavailable',
+      job: appendQualityWarning({
+        ...job,
+        sellerFailures: [
+          ...(job.sellerFailures || []),
+          {
+            stage: 'seller-profile',
+            url: currentItem?.itemUrl || currentLink?.itemUrl || '',
+            itemId: currentItem?.itemId || currentLink?.itemId || '',
+            sellerUrl: '',
+            error: '详情页未识别到可进入的卖家账号页，已保留商品结果；请记录此链接后补采店铺资料。'
+          }
+        ].slice(-100)
+      }, currentItem)
+    };
+  }
 
   const jobWithSellerEntry = currentItem
     ? {
@@ -1122,8 +1247,9 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
   const identity = itemIdentity(currentItem);
   if (cached) {
     const stagedJob = mergeStagedItemWithProfile(jobWithSellerEntry, currentItem, cached);
+    const stagedItem = stagedJob.stagedItems?.find(candidate => itemKey(candidate) === itemKey(currentItem)) || currentItem;
     return { kind: 'cached', job: {
-      ...stagedJob,
+      ...appendQualityWarning(stagedJob, stagedItem),
       sellerProfiles: { ...(jobWithSellerEntry.sellerProfiles || {}), [key]: cached }
     } };
   }
@@ -1164,16 +1290,16 @@ async function scheduleJob(job, status, delayMs = 1000) {
 
 async function notifyJobFinished(job, exportResult = null) {
   const settings = await readSettings();
-  const statusLabel = job.status === 'completed' ? '采集完成' : job.status === 'stopped' ? '采集已停止' : '采集失败';
-  const detail = `成功 ${job.collected || 0} 条${job.failures?.length ? `，失败 ${job.failures.length} 条` : ''}${job.sellerFailures?.length ? `，店铺资料补充失败 ${job.sellerFailures.length} 条` : ''}`;
+  const statusLabel = job.status === 'completed' ? '采集完成' : job.status === 'partial' ? '采集部分完成' : job.status === 'stopped' ? '采集已停止' : '采集失败';
+  const detail = `成功 ${job.collected || 0} 条${job.failures?.length ? `，详情失败 ${job.failures.length} 条` : ''}${job.sellerFailures?.length ? `，店铺资料补充失败 ${job.sellerFailures.length} 条` : ''}${job.qualityWarnings?.length ? `，字段待补充 ${job.qualityWarnings.length} 条` : ''}`;
   const message = exportResult?.filename
     ? `${detail}，Excel 已下载：${exportResult.filename}`
     : detail;
 
   if (chrome.action?.setBadgeText) {
-    await chrome.action.setBadgeText({ text: job.status === 'completed' ? '✓' : '!' }).catch(() => {});
+    await chrome.action.setBadgeText({ text: ['completed', 'partial'].includes(job.status) ? '✓' : '!' }).catch(() => {});
     await chrome.action.setBadgeBackgroundColor({
-      color: job.status === 'completed' ? '#2f8f68' : '#c65c52'
+      color: job.status === 'completed' ? '#2f8f68' : job.status === 'partial' ? '#d39b32' : '#c65c52'
     }).catch(() => {});
   }
 
@@ -1195,9 +1321,10 @@ async function finishJob(job, status, message, options = {}) {
   if (!current || current.id !== job?.id || !jobIsActive(current) || (!force && isJobCancelled(job))) {
     return current || job;
   }
-  const finalJob = jobMessage({ ...(force ? current : job), status }, message);
+  const effectiveStatus = terminalStatus(status, force ? current : job);
+  const finalJob = jobMessage({ ...(force ? current : job), status: effectiveStatus }, message);
   const persistedJob = await writeJob(finalJob, { force });
-  if (!force && (isJobCancelled(job) || persistedJob?.id !== job.id || persistedJob?.status !== status)) {
+  if (!force && (isJobCancelled(job) || persistedJob?.id !== job.id || persistedJob?.status !== effectiveStatus)) {
     return persistedJob || await readJob();
   }
 
@@ -1208,7 +1335,7 @@ async function finishJob(job, status, message, options = {}) {
   const jobItems = itemsForJob(finalJob, await readItems());
 
   let exportResult = null;
-  if (status === 'completed') {
+  if (effectiveStatus === 'completed' || effectiveStatus === 'partial') {
     const settings = await readSettings();
     if (settings.downloadMode === 'auto') {
       try {
@@ -1250,7 +1377,12 @@ async function advanceLinkJob(job, failureMessage = '') {
   const nextIndex = Number(job.index || 0) + 1;
   const failures = [...(job.failures || [])];
   if (failureMessage && job.links?.[job.index]) {
-    failures.push({ url: job.links[job.index], error: failureMessage });
+    failures.push({
+      stage: 'detail-page',
+      url: job.links[job.index],
+      itemId: itemIdFromUrl(job.links[job.index]),
+      error: failureMessage
+    });
   }
 
   const next = {
@@ -1393,6 +1525,9 @@ function normalizeSearchJob(job) {
     seenLinks: Array.isArray(job.seenLinks) ? job.seenLinks : [],
     resultKeys: Array.isArray(job.resultKeys) ? job.resultKeys : [],
     sellerProfiles: job.sellerProfiles && typeof job.sellerProfiles === 'object' ? job.sellerProfiles : {},
+    failures: Array.isArray(job.failures) ? job.failures : [],
+    sellerFailures: Array.isArray(job.sellerFailures) ? job.sellerFailures : [],
+    qualityWarnings: Array.isArray(job.qualityWarnings) ? job.qualityWarnings : [],
     collectSellerInfo: job.collectSellerInfo !== false,
     visited: Math.max(0, Number(job.visited) || 0),
     countSearchPage: job.countSearchPage !== false
@@ -1423,7 +1558,12 @@ async function advanceSearchDetail(job, count = 0, failureMessage = '') {
   const currentLink = job.pageLinks?.[job.detailIndex];
   const failures = [...(job.failures || [])];
   if (failureMessage && currentLink?.itemUrl) {
-    failures.push({ url: currentLink.itemUrl, error: failureMessage });
+    failures.push({
+      stage: 'detail-page',
+      url: currentLink.itemUrl,
+      itemId: currentLink.itemId || itemIdFromUrl(currentLink.itemUrl),
+      error: failureMessage
+    });
   }
 
   const visited = Number(job.visited || 0) + 1;
@@ -1674,12 +1814,21 @@ async function finishPendingSellerStep(job, profile = null, errorMessage = '') {
     next = { ...next, sellerProfiles };
   }
 
+  const stagedItem = next.stagedItems?.find(candidate => itemKey(candidate) === itemKey(pending));
+  if (stagedItem) next = appendQualityWarning(next, stagedItem);
+
   if (errorMessage) {
     next = {
       ...next,
       sellerFailures: [
         ...(job.sellerFailures || []),
-        { itemId: pending.itemId || '', sellerUrl: job.pendingSellerUrl || '', error: errorMessage }
+        {
+          stage: 'seller-profile',
+          url: pending.itemUrl || '',
+          itemId: pending.itemId || '',
+          sellerUrl: job.pendingSellerUrl || '',
+          error: errorMessage
+        }
       ].slice(-100)
     };
   }
@@ -1751,6 +1900,7 @@ async function startLinksJob(links, delayMs = 1500, mode = 'rpa') {
     resultKeys: [],
     sellerProfiles: {},
     sellerFailures: [],
+    qualityWarnings: [],
     collectSellerInfo: settings.collectSellerInfo !== false,
     failures: [],
     retries: 0,
@@ -1804,6 +1954,7 @@ async function startSearchJob(startUrl, targetCount, maxPages, delayMs = 1800, m
     resultKeys: [],
     sellerProfiles: {},
     sellerFailures: [],
+    qualityWarnings: [],
     collectSellerInfo: settings.collectSellerInfo !== false,
     failures: [],
     retries: 0,
