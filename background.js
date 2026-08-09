@@ -6,14 +6,20 @@ const JOB_KEY = 'xianyu_collect_job_v1';
 const JOB_ALARM = 'xianyu_collect_job_alarm_v1';
 const SETTINGS_KEY = 'xianyu_collect_settings_v1';
 const HISTORY_KEY = 'xianyu_collect_history_v1';
+const MONITORS_KEY = 'xianyu_monitor_configs_v1';
+const MONITOR_RUNS_KEY = 'xianyu_monitor_runs_v1';
+const MONITOR_ALARM_PREFIX = 'xianyu_monitor_alarm_v1:';
 const OFFSCREEN_PATH = 'offscreen.html';
 const MAX_ITEMS = 2000;
 const MAX_STORE_PROFILES = 200;
 const MAX_STORE_REVIEWS = 1000;
 const MAX_HISTORY = 50;
+const MAX_MONITORS = 100;
+const MAX_MONITOR_LINKS = 500;
 const TAB_MESSAGE_TIMEOUT_MS = 12000;
 const JOB_STALE_TIMEOUT_MS = 90000;
 const cancelledJobIds = new Set();
+const monitorRunLocks = new Set();
 
 function markJobCancelled(jobId) {
   if (!jobId) return;
@@ -376,6 +382,157 @@ async function writeHistory(history) {
   return history;
 }
 
+function monitorAlarmName(monitorId) {
+  return `${MONITOR_ALARM_PREFIX}${cleanText(monitorId, 100)}`;
+}
+
+function monitorKind(value) {
+  return value === 'store' ? 'store' : 'product';
+}
+
+function monitorKindLabel(value) {
+  return monitorKind(value) === 'store' ? '店铺' : '商品';
+}
+
+function isAbsoluteDownloadFolder(value) {
+  const text = cleanText(value || '', 200);
+  return /^(?:[a-z]:[\\/]|[\\/]{1,2})/i.test(text)
+    || /(^|[\\/])\.\.(?:[\\/]|$)/.test(text);
+}
+
+function normalizeMonitorFolder(value, fallback = DEFAULT_SETTINGS.downloadFolder) {
+  const raw = cleanText(value || fallback, 160);
+  if (isAbsoluteDownloadFolder(raw)) {
+    throw new Error('监控下载位置只能填写 Chrome 默认下载目录下的相对文件夹，不能填写绝对路径。');
+  }
+  return normalizeSettings({ downloadFolder: raw }).downloadFolder;
+}
+
+function normalizeMonitorLinks(kind, input) {
+  const values = Array.isArray(input) ? input : String(input || '').split(/[\s,]+/);
+  const validator = monitorKind(kind) === 'store' ? validSellerUrl : validItemUrl;
+  return [...new Set(values
+    .map(value => validator(cleanUrl(value)))
+    .filter(Boolean))].slice(0, MAX_MONITOR_LINKS);
+}
+
+function monitorTimeParts(input, fallback = {}) {
+  const hour = Number(input?.hour ?? fallback.hour ?? 9);
+  const minute = Number(input?.minute ?? fallback.minute ?? 0);
+  return {
+    hour: Number.isFinite(hour) ? Math.max(0, Math.min(23, Math.floor(hour))) : 9,
+    minute: Number.isFinite(minute) ? Math.max(0, Math.min(59, Math.floor(minute))) : 0
+  };
+}
+
+function nextMonitorRunAt(config, from = Date.now()) {
+  const now = new Date(from);
+  const next = new Date(from);
+  next.setHours(config.hour, config.minute, 0, 0);
+  if (next.getTime() <= from + 500) next.setDate(next.getDate() + 1);
+  return next.getTime();
+}
+
+function normalizeMonitorConfig(input = {}, previous = {}) {
+  const kind = monitorKind(input.kind || previous.kind);
+  const parts = monitorTimeParts(input, previous);
+  const now = new Date().toISOString();
+  const id = cleanText(input.id || previous.id || `monitor-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, 100);
+  const links = normalizeMonitorLinks(kind, input.links ?? previous.links);
+  const folder = normalizeMonitorFolder(
+    input.downloadFolder ?? previous.downloadFolder,
+    kind === 'store' ? '闲鱼研究监控/店铺' : '闲鱼研究监控/商品'
+  );
+  return {
+    id,
+    kind,
+    name: cleanText(input.name || previous.name || `${monitorKindLabel(kind)}监控`, 80),
+    links,
+    hour: parts.hour,
+    minute: parts.minute,
+    downloadFolder: folder,
+    mode: input.mode !== undefined ? (input.mode === 'api' ? 'api' : 'rpa') : (previous.mode === 'api' ? 'api' : 'rpa'),
+    enabled: input.enabled !== undefined ? input.enabled !== false : previous.enabled !== false,
+    createdAt: cleanText(previous.createdAt || input.createdAt || now, 80),
+    updatedAt: now,
+    nextRunAt: Number(input.nextRunAt || previous.nextRunAt || 0),
+    lastRunAt: cleanText(input.lastRunAt || previous.lastRunAt || '', 80),
+    lastRunStatus: cleanText(input.lastRunStatus || previous.lastRunStatus || '', 40),
+    lastRunMessage: cleanText(input.lastRunMessage || previous.lastRunMessage || '', 1000),
+    lastRunFile: cleanText(input.lastRunFile || previous.lastRunFile || '', 300),
+    lastRunCount: Math.max(0, Number(input.lastRunCount ?? previous.lastRunCount ?? 0) || 0),
+    lastRunFailureCount: Math.max(0, Number(input.lastRunFailureCount ?? previous.lastRunFailureCount ?? 0) || 0)
+  };
+}
+
+async function readMonitors() {
+  const result = await chrome.storage.local.get(MONITORS_KEY);
+  const values = Array.isArray(result[MONITORS_KEY]) ? result[MONITORS_KEY] : [];
+  return values.map(value => {
+    try { return normalizeMonitorConfig(value, value); } catch (_) { return null; }
+  }).filter(Boolean).slice(0, MAX_MONITORS);
+}
+
+async function writeMonitors(monitors) {
+  const normalized = (Array.isArray(monitors) ? monitors : [])
+    .map(value => {
+      try { return normalizeMonitorConfig(value, value); } catch (_) { return null; }
+    })
+    .filter(Boolean)
+    .slice(0, MAX_MONITORS);
+  await chrome.storage.local.set({ [MONITORS_KEY]: normalized });
+  return normalized;
+}
+
+async function readMonitorRuns() {
+  const result = await chrome.storage.local.get(MONITOR_RUNS_KEY);
+  return result[MONITOR_RUNS_KEY] && typeof result[MONITOR_RUNS_KEY] === 'object'
+    ? result[MONITOR_RUNS_KEY]
+    : {};
+}
+
+async function writeMonitorRuns(runs) {
+  await chrome.storage.local.set({ [MONITOR_RUNS_KEY]: runs || {} });
+  return runs || {};
+}
+
+async function readMonitorRun(monitorId) {
+  const runs = await readMonitorRuns();
+  return runs[monitorId] || null;
+}
+
+async function writeMonitorRun(run) {
+  const runs = await readMonitorRuns();
+  runs[run.monitorId] = run;
+  await writeMonitorRuns(runs);
+  return run;
+}
+
+async function deleteMonitorRun(monitorId) {
+  const runs = await readMonitorRuns();
+  delete runs[monitorId];
+  await writeMonitorRuns(runs);
+  return runs;
+}
+
+async function patchMonitor(monitorId, patch) {
+  const monitors = await readMonitors();
+  const index = monitors.findIndex(item => item.id === monitorId);
+  if (index < 0) return null;
+  monitors[index] = normalizeMonitorConfig({ ...monitors[index], ...patch }, monitors[index]);
+  await writeMonitors(monitors);
+  return monitors[index];
+}
+
+async function scheduleMonitorAlarm(config, when = nextMonitorRunAt(config)) {
+  const name = monitorAlarmName(config.id);
+  await chrome.alarms.clear(name).catch(() => {});
+  if (config.enabled) {
+    chrome.alarms.create(name, { when: Math.max(Date.now() + 500, Number(when) || nextMonitorRunAt(config)) });
+  }
+  return when;
+}
+
 function itemsForJob(job, items) {
   if (Array.isArray(job?.stagedItems)) {
     return job.stagedItems.map(item => sanitizeItem(item)).filter(Boolean);
@@ -664,6 +821,10 @@ function downloadFileName(settings, count, type, mode) {
       ? '链接批量'
       : type === 'store'
         ? '店铺资料'
+        : type === 'monitor-product'
+          ? '商品监控'
+          : type === 'monitor-store'
+            ? '店铺监控'
         : type === 'detail'
           ? '当前详情'
           : type === 'data'
@@ -688,7 +849,8 @@ function runExport(items, settings, context = {}) {
   const task = async () => {
     await ensureOffscreenDocument();
     const exportType = context.type || 'search';
-    const exportCount = exportType === 'store'
+    const isStoreExport = exportType === 'store' || exportType === 'monitor-store';
+    const exportCount = isStoreExport
       ? (Array.isArray(context.storeProfiles) ? context.storeProfiles.length : 0)
       : (Array.isArray(items) ? items.length : 0);
     const filename = downloadFileName(
@@ -702,7 +864,7 @@ function runExport(items, settings, context = {}) {
       target: 'offscreen',
       items: Array.isArray(items) ? items : [],
       storeProfiles: Array.isArray(context.storeProfiles) ? context.storeProfiles : [],
-      exportKind: exportType === 'store' ? 'store' : 'product',
+      exportKind: isStoreExport ? 'store' : 'product',
       settings: normalizeSettings(settings),
       filename
     });
@@ -1818,6 +1980,306 @@ async function startSearchJob(startUrl, targetCount, maxPages, delayMs = 1800, m
   return scheduleJob(job, 'ready-to-collect', 1800);
 }
 
+function monitorRunProgress(run) {
+  const total = Array.isArray(run?.links) ? run.links.length : 0;
+  const index = Math.min(total, Math.max(0, Number(run?.index) || 0));
+  return {
+    status: cleanText(run?.status || '', 40),
+    index,
+    total,
+    currentLink: cleanUrl(run?.links?.[index] || ''),
+    itemCount: Array.isArray(run?.items) ? run.items.length : 0,
+    storeCount: Array.isArray(run?.storeProfiles) ? run.storeProfiles.length : 0,
+    failureCount: Array.isArray(run?.failures) ? run.failures.length : 0,
+    message: cleanText(run?.message || '', 1000),
+    updatedAt: cleanText(run?.updatedAt || '', 80)
+  };
+}
+
+async function monitorView() {
+  const monitors = await readMonitors();
+  const runs = await readMonitorRuns();
+  return monitors.map(config => ({
+    ...config,
+    running: Boolean(runs[config.id]),
+    run: runs[config.id] ? monitorRunProgress(runs[config.id]) : null
+  }));
+}
+
+async function scheduleMonitorStep(monitorId, delayMs = 1200) {
+  const name = monitorAlarmName(monitorId);
+  await chrome.alarms.clear(name).catch(() => {});
+  chrome.alarms.create(name, { when: Date.now() + Math.max(500, Number(delayMs) || 1200) });
+}
+
+async function monitorExportSettings(config) {
+  const settings = await readSettings();
+  const baseName = cleanDownloadPart(config.name || `${monitorKindLabel(config.kind)}监控`, '闲鱼监控');
+  return normalizeSettings({
+    ...settings,
+    mode: config.mode,
+    downloadMode: 'auto',
+    saveAs: false,
+    downloadFolder: config.downloadFolder,
+    fileNameTemplate: `${baseName}-{type}-{date}-{time}-{count}`
+  });
+}
+
+async function ensureMonitorTab(run, url) {
+  let tabId = Number(run.tabId);
+  if (!Number.isInteger(tabId)) {
+    const tab = await tabsCreate({ url, active: false });
+    tabId = Number(tab.id);
+  }
+
+  try {
+    await tabsUpdate(tabId, { url });
+  } catch (error) {
+    const tab = await tabsCreate({ url, active: false });
+    tabId = Number(tab.id);
+  }
+
+  await waitForTabComplete(tabId, 35_000).catch(() => {});
+  return tabId;
+}
+
+async function collectMonitorProduct(tabId, link, mode, collectSellerInfo) {
+  const pageInfo = await ensureContentReceiver(tabId);
+  if (pageInfo?.pageType !== 'detail') {
+    throw new Error('监控打开的页面不是商品详情页，已跳过，避免把搜索卡片写入商品表。');
+  }
+  const result = assertDetailCollection(await sendCollectionByMode(tabId, mode), link);
+  let item = collectedItemForLink(result, { itemUrl: link });
+  if (!item) throw new Error('详情页没有返回可保存的商品记录。');
+
+  if (collectSellerInfo !== false) {
+    let sellerUrl = validSellerUrl(item.sellerUrl || '');
+    if (!sellerUrl) {
+      const entry = await discoverSellerEntry(tabId);
+      sellerUrl = validSellerUrl(entry?.sellerUrl || '');
+      if (sellerUrl) item = sanitizeItem({
+        ...item,
+        sellerUrl,
+        sellerName: item.sellerName || entry.sellerName || ''
+      }, link);
+    }
+
+    if (sellerUrl) {
+      const profile = await fetchSellerProfileInTab(tabId, sellerUrl, link);
+      const productProfile = sanitizeStoreProfile(
+        { ...profile, reviews: [] },
+        sellerUrl,
+        { forProduct: true }
+      );
+      item = applyProfileToItem(item, productProfile || profile);
+    }
+  }
+
+  return sanitizeItem({ ...item, sourcePage: link }, link);
+}
+
+async function collectMonitorStore(tabId, link) {
+  const pageInfo = await ensureContentReceiver(tabId);
+  if (pageInfo?.pageType !== 'account') {
+    throw new Error('监控打开的页面不是店铺/账号页，已跳过。');
+  }
+  const result = await sendTabMessage(tabId, {
+    type: 'COLLECT_CURRENT_STORE_PAGE',
+    persistToDataCenter: false
+  }, 55_000);
+  if (!result?.ok) throw new Error(result?.error || '店铺页没有返回可保存的数据。');
+  const profile = sanitizeStoreProfile(result.profile || result, link);
+  if (!profile) throw new Error('店铺页没有识别到公开资料或评价。');
+  return profile;
+}
+
+async function notifyMonitorFinished(config, status, message) {
+  const settings = await readSettings();
+  if (!settings.notifyOnComplete || !chrome.notifications?.create) return;
+  const statusLabel = status === 'completed' ? '完成' : status === 'partial' ? '部分完成' : status === 'stopped' ? '已停止' : '失败';
+  await chrome.notifications.create(`xianyu-monitor-${config.id}-${Date.now()}`, {
+    type: 'basic',
+    title: `闲鱼研究采集器 · ${config.name || `${monitorKindLabel(config.kind)}监控`} ${statusLabel}`,
+    message,
+    iconUrl: chrome.runtime.getURL('icon.svg')
+  }).catch(() => {});
+}
+
+async function finishMonitorRun(run, options = {}) {
+  const current = await readMonitorRun(run.monitorId);
+  if (!current || current.id !== run.id) return current || run;
+  const configs = await readMonitors();
+  const config = configs.find(item => item.id === run.monitorId);
+  const count = run.kind === 'store'
+    ? (Array.isArray(run.storeProfiles) ? run.storeProfiles.length : 0)
+    : (Array.isArray(run.items) ? run.items.length : 0);
+  const failures = Array.isArray(run.failures) ? run.failures : [];
+  let exportResult = null;
+  let exportError = '';
+
+  if (config && options.skipExport !== true && count > 0 && options.status !== 'stopped') {
+    try {
+      const settings = await monitorExportSettings(config);
+      exportResult = await runExport(
+        run.kind === 'store' ? [] : run.items,
+        settings,
+        {
+          type: run.kind === 'store' ? 'monitor-store' : 'monitor-product',
+          mode: run.mode,
+          storeProfiles: run.kind === 'store' ? run.storeProfiles : []
+        }
+      );
+    } catch (error) {
+      exportError = error?.message || String(error);
+    }
+  }
+
+  let status = options.status || (count > 0 ? 'completed' : 'failed');
+  if (status === 'completed' && (failures.length || exportError)) status = 'partial';
+  if (!count && !options.status) status = 'failed';
+  const parts = [
+    `${monitorKindLabel(run.kind)}监控${status === 'completed' ? '完成' : status === 'partial' ? '部分完成' : status === 'stopped' ? '已停止' : '失败'}`,
+    run.kind === 'store' ? `成功 ${count} 个店铺` : `成功 ${count} 条商品`,
+    failures.length ? `失败 ${failures.length} 条` : '',
+    exportResult?.filename ? `Excel 已下载：${exportResult.filename}` : '',
+    exportError ? `自动下载失败：${exportError}` : '',
+    options.message || ''
+  ].filter(Boolean).join('，');
+
+  if (Number.isInteger(Number(run.tabId))) await tabsRemove(Number(run.tabId)).catch(() => {});
+  await chrome.alarms.clear(monitorAlarmName(run.monitorId)).catch(() => {});
+  await deleteMonitorRun(run.monitorId);
+
+  if (config) {
+    const nextRunAt = config.enabled ? nextMonitorRunAt(config) : 0;
+    const updated = normalizeMonitorConfig({
+      ...config,
+      nextRunAt,
+      lastRunAt: new Date().toISOString(),
+      lastRunStatus: status,
+      lastRunMessage: parts,
+      lastRunFile: exportResult?.filename || '',
+      lastRunCount: count,
+      lastRunFailureCount: failures.length
+    }, config);
+    const nextConfigs = configs.map(item => item.id === config.id ? updated : item);
+    await writeMonitors(nextConfigs);
+    if (updated.enabled) await scheduleMonitorAlarm(updated, nextRunAt);
+    await notifyMonitorFinished(updated, status, parts);
+  }
+  return { ...run, status, message: parts, exportResult, exportError };
+}
+
+async function processMonitorRunStep(monitorId) {
+  if (monitorRunLocks.has(monitorId)) return readMonitorRun(monitorId);
+  monitorRunLocks.add(monitorId);
+  try {
+    const run = await readMonitorRun(monitorId);
+    if (!run) return null;
+    const config = (await readMonitors()).find(item => item.id === monitorId);
+    if (!config || (!config.enabled && run.force !== true)) {
+      return finishMonitorRun(run, { status: 'stopped', skipExport: true, message: '监控已暂停或删除。' });
+    }
+
+    const total = Array.isArray(run.links) ? run.links.length : 0;
+    if ((Number(run.index) || 0) >= total) return finishMonitorRun(run);
+    const link = run.links[run.index];
+    const collecting = {
+      ...run,
+      status: 'collecting',
+      currentLink: link,
+      updatedAt: new Date().toISOString(),
+      message: `正在处理第 ${Number(run.index) + 1}/${total} 个${monitorKindLabel(run.kind)}链接。`
+    };
+    await writeMonitorRun(collecting);
+
+    let next = { ...collecting };
+    try {
+      const tabId = await ensureMonitorTab(collecting, link);
+      next.tabId = tabId;
+      if (run.kind === 'store') {
+        const profile = await collectMonitorStore(tabId, link);
+        next.storeProfiles = mergeStoreProfiles(next.storeProfiles || [], [profile]);
+      } else {
+        const settings = await readSettings();
+        const item = await collectMonitorProduct(tabId, link, run.mode, settings.collectSellerInfo !== false);
+        next.items = mergeItems(next.items || [], [item]);
+      }
+    } catch (error) {
+      next.failures = [
+        ...(next.failures || []),
+        { url: link, error: error?.message || String(error) }
+      ].slice(-100);
+    }
+
+    next.index = Number(run.index || 0) + 1;
+    next.status = 'waiting';
+    next.updatedAt = new Date().toISOString();
+    next.message = `已处理 ${next.index}/${total} 个${monitorKindLabel(run.kind)}链接，${run.kind === 'store' ? `成功 ${next.storeProfiles?.length || 0} 个店铺` : `成功 ${next.items?.length || 0} 条商品`}。`;
+    await writeMonitorRun(next);
+    if (next.index >= total) return finishMonitorRun(next);
+    await scheduleMonitorStep(monitorId, 1400);
+    return next;
+  } finally {
+    monitorRunLocks.delete(monitorId);
+  }
+}
+
+async function startMonitorRun(monitorId, force = false) {
+  const config = (await readMonitors()).find(item => item.id === monitorId);
+  if (!config) throw new Error('找不到这条监控配置。');
+  if (!config.enabled && !force) throw new Error('这条监控已暂停，请先重新启用。');
+  const existing = await readMonitorRun(monitorId);
+  if (existing) throw new Error('这条监控正在运行，请等待本轮完成。');
+  if (!config.links.length) throw new Error('这条监控没有有效链接。');
+
+  const settings = await readSettings();
+  const run = {
+    id: `monitor-run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    monitorId,
+    kind: config.kind,
+    mode: config.mode,
+    links: [...config.links],
+    index: 0,
+    status: 'waiting',
+    tabId: 0,
+    items: [],
+    storeProfiles: [],
+    failures: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    message: `监控已启动，共 ${config.links.length} 个${monitorKindLabel(config.kind)}链接。`,
+    collectSellerInfo: settings.collectSellerInfo !== false,
+    force
+  };
+  await writeMonitorRun(run);
+  await scheduleMonitorStep(monitorId, 250);
+  return run;
+}
+
+async function syncMonitorAlarms() {
+  const monitors = await readMonitors();
+  let changed = false;
+  for (const config of monitors) {
+    if (!config.enabled) {
+      await chrome.alarms.clear(monitorAlarmName(config.id)).catch(() => {});
+      continue;
+    }
+    let alarm = null;
+    if (typeof chrome.alarms.get === 'function') {
+      alarm = await chrome.alarms.get(monitorAlarmName(config.id)).catch(() => null);
+    }
+    if (!alarm) {
+      const nextRunAt = nextMonitorRunAt(config);
+      await scheduleMonitorAlarm(config, nextRunAt);
+      config.nextRunAt = nextRunAt;
+      changed = true;
+    }
+  }
+  if (changed) await writeMonitors(monitors);
+  return monitors;
+}
+
 async function configureSidePanel() {
   if (!chrome.sidePanel?.setPanelBehavior) return;
   await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -1828,11 +2290,15 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (!Array.isArray(existing)) await writeItems([]);
   const settingsResult = await chrome.storage.local.get(SETTINGS_KEY);
   if (!settingsResult[SETTINGS_KEY]) await writeSettings(DEFAULT_SETTINGS);
+  const monitorsResult = await chrome.storage.local.get(MONITORS_KEY);
+  if (!Array.isArray(monitorsResult[MONITORS_KEY])) await writeMonitors([]);
+  await syncMonitorAlarms();
   await configureSidePanel();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   void configureSidePanel();
+  void syncMonitorAlarms();
 });
 
 chrome.action.onClicked.addListener(tab => {
@@ -1861,6 +2327,24 @@ chrome.tabs.onRemoved.addListener(tabId => {
 
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === JOB_ALARM) void processJobAlarm();
+  else if (alarm.name?.startsWith(MONITOR_ALARM_PREFIX)) {
+    const monitorId = alarm.name.slice(MONITOR_ALARM_PREFIX.length);
+    void (async () => {
+      const run = await readMonitorRun(monitorId);
+      if (run) await processMonitorRunStep(monitorId);
+      else {
+        const config = (await readMonitors()).find(item => item.id === monitorId);
+        if (config?.enabled) {
+          try {
+            await startMonitorRun(monitorId);
+            await processMonitorRunStep(monitorId);
+          } catch (_) {
+            // 监控配置可能在闹钟触发的同时被删除或暂停；下一次保存会重新同步闹钟。
+          }
+        }
+      }
+    })();
+  }
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -2076,6 +2560,67 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'GET_STATUS':
         return { ok: true, count: (await readItems()).length, storeCount: (await readStoreProfiles()).length };
+
+      case 'GET_MONITORS':
+        await syncMonitorAlarms();
+        return { ok: true, monitors: await monitorView() };
+
+      case 'SAVE_MONITOR': {
+        const raw = message.monitor && typeof message.monitor === 'object' ? message.monitor : {};
+        const monitors = await readMonitors();
+        const existing = raw.id ? monitors.find(item => item.id === cleanText(raw.id, 100)) : null;
+        const normalized = normalizeMonitorConfig(raw, existing || {});
+        if (!normalized.links.length) {
+          throw new Error(`请至少填写一个有效的${monitorKindLabel(normalized.kind)}链接。`);
+        }
+        const nextRunAt = normalized.enabled ? nextMonitorRunAt(normalized) : 0;
+        const saved = normalizeMonitorConfig({ ...normalized, nextRunAt }, existing || normalized);
+        const nextMonitors = existing
+          ? monitors.map(item => item.id === existing.id ? saved : item)
+          : [saved, ...monitors];
+        await writeMonitors(nextMonitors);
+        await chrome.alarms.clear(monitorAlarmName(saved.id)).catch(() => {});
+        if (saved.enabled) await scheduleMonitorAlarm(saved, nextRunAt);
+        const active = await readMonitorRun(saved.id);
+        if (active && !saved.enabled) await finishMonitorRun(active, { status: 'stopped', skipExport: true, message: '配置已暂停。' });
+        return { ok: true, monitor: saved, monitors: await monitorView() };
+      }
+
+      case 'SET_MONITOR_ENABLED': {
+        const monitorId = cleanText(message.monitorId, 100);
+        const monitors = await readMonitors();
+        const current = monitors.find(item => item.id === monitorId);
+        if (!current) throw new Error('找不到这条监控配置。');
+        const enabled = message.enabled !== false;
+        const nextRunAt = enabled ? nextMonitorRunAt(current) : 0;
+        const updated = normalizeMonitorConfig({ ...current, enabled, nextRunAt }, current);
+        await writeMonitors(monitors.map(item => item.id === monitorId ? updated : item));
+        await chrome.alarms.clear(monitorAlarmName(monitorId)).catch(() => {});
+        if (enabled) await scheduleMonitorAlarm(updated, nextRunAt);
+        else {
+          const active = await readMonitorRun(monitorId);
+          if (active) await finishMonitorRun(active, { status: 'stopped', skipExport: true, message: '监控已暂停。' });
+        }
+        return { ok: true, monitors: await monitorView() };
+      }
+
+      case 'DELETE_MONITOR': {
+        const monitorId = cleanText(message.monitorId, 100);
+        const active = await readMonitorRun(monitorId);
+        if (active) await finishMonitorRun(active, { status: 'stopped', skipExport: true, message: '监控配置已删除。' });
+        await chrome.alarms.clear(monitorAlarmName(monitorId)).catch(() => {});
+        const monitors = await readMonitors();
+        await writeMonitors(monitors.filter(item => item.id !== monitorId));
+        await deleteMonitorRun(monitorId);
+        return { ok: true, monitors: await monitorView() };
+      }
+
+      case 'RUN_MONITOR_NOW': {
+        const monitorId = cleanText(message.monitorId, 100);
+        const run = await startMonitorRun(monitorId, true);
+        await processMonitorRunStep(monitorId);
+        return { ok: true, run, monitors: await monitorView() };
+      }
 
       case 'GET_STORE_STATUS': {
         const sellerUrl = validSellerUrl(message.sellerUrl || sender?.tab?.url || '');
