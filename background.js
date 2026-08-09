@@ -163,7 +163,8 @@ function itemKey(item) {
 }
 
 function isInternalCategory(value) {
-  return /^类目ID\s*\d+$/i.test(cleanText(value || '', 200));
+  const text = cleanText(value || '', 200);
+  return /^类目ID\s*\d+$/i.test(text) || /^\d{5,}$/.test(text);
 }
 
 function preferCategoryValue(oldValue, newValue) {
@@ -528,13 +529,24 @@ function jobFailureRecords(job) {
 function missingProductFields(item) {
   if (!item) return [];
   const missing = [];
-  if (!cleanText(item.itemId || item.itemUrl, 200)) missing.push('商品ID/链接');
+  if (!cleanText(item.itemId, 200)) missing.push('商品ID');
+  if (!cleanText(item.itemUrl, 200)) missing.push('商品链接');
   if (!cleanText(item.description, 12000)) missing.push('商品文案');
+  if (!cleanText(item.viewCount, 100)) missing.push('浏览数');
+  if (!cleanText(item.wantCount, 100)) missing.push('想要数');
   if (!cleanText(item.price, 100)) missing.push('价格');
   if (!cleanText(item.category, 500)) missing.push('类目');
   if (!Array.isArray(item.images) || !item.images.length) missing.push('商品图片');
   if (!cleanText(item.sellerName, 500)) missing.push('店铺名称');
   if (!validSellerUrl(item.sellerUrl || '')) missing.push('卖家账号页');
+  if (!cleanText(item.sellerLocation, 300)) missing.push('卖家地区');
+  if (!cleanText(item.sellerFollowers, 100)) missing.push('粉丝数');
+  if (!cleanText(item.sellerFollowing, 100)) missing.push('关注数');
+  if (!cleanText(item.sellerProductCount, 100)) missing.push('卖家商品数');
+  if (!cleanText(item.sellerIntro, 4000)) missing.push('店铺简介');
+  if (!cleanText(item.storeDuration, 300)) missing.push('开店时长');
+  if (!cleanText(item.itemGoodRate, 100)) missing.push('商品好评率');
+  if (!cleanText(item.sellerReviewCount, 100)) missing.push('店铺评价数');
   return missing;
 }
 
@@ -1191,7 +1203,7 @@ function collectedItemForLink(result, link) {
 }
 
 async function prepareSellerEnrichment(job, item, pendingCount) {
-  if (job.collectSellerInfo === false) return { kind: 'disabled', job: appendQualityWarning(job, item) };
+  if (job.collectSellerInfo === false) return { kind: 'disabled', job };
   if (!(await canContinueJob(job))) return { kind: 'cancelled', job: await readJob() };
   let currentItem = sanitizeItem(item || {});
   let sellerUrl = validSellerUrl(currentItem?.sellerUrl || '');
@@ -1241,11 +1253,15 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
     : job;
 
   const key = sellerProfileKey(sellerUrl);
-  const cached = jobWithSellerEntry.sellerProfiles?.[key]
-    || (await readStoreProfiles()).find(profile => sellerProfileKey(profile?.sellerUrl || '') === key);
+  const taskCached = jobWithSellerEntry.sellerProfiles?.[key] || null;
+  const persistedCached = (await readStoreProfiles()).find(profile => sellerProfileKey(profile?.sellerUrl || '') === key) || null;
+  // 店铺表按产品边界不保存“开店时长/商品好评率”，所以持久化的店铺资料
+  // 只能先补通用字段，不能直接当作商品任务已经完成了账号页补采。
+  // 同一批任务里已经访问过的账号页会带 productFieldsLoaded 标记，后续商品才可复用。
+  const cached = taskCached || persistedCached;
   if (!(await canContinueJob(job))) return { kind: 'cancelled', job: await readJob() };
   const identity = itemIdentity(currentItem);
-  if (cached) {
+  if (taskCached?.productFieldsLoaded === true) {
     const stagedJob = mergeStagedItemWithProfile(jobWithSellerEntry, currentItem, cached);
     const stagedItem = stagedJob.stagedItems?.find(candidate => itemKey(candidate) === itemKey(currentItem)) || currentItem;
     return { kind: 'cached', job: {
@@ -1254,8 +1270,16 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
     } };
   }
 
+  const stagedWithPersistedProfile = persistedCached
+    ? mergeStagedItemWithProfile(jobWithSellerEntry, currentItem, persistedCached)
+    : jobWithSellerEntry;
+  const sellerProfiles = persistedCached
+    ? { ...(stagedWithPersistedProfile.sellerProfiles || {}), [key]: { ...persistedCached, productFieldsLoaded: false } }
+    : stagedWithPersistedProfile.sellerProfiles || {};
+
   const waiting = jobMessage({
-    ...jobWithSellerEntry,
+    ...stagedWithPersistedProfile,
+    sellerProfiles,
     status: 'waiting-page',
     stage: 'account-page',
     pendingItem: identity,
@@ -1805,10 +1829,10 @@ async function finishPendingSellerStep(job, profile = null, errorMessage = '') {
     const key = job.pendingSellerKey || sellerProfileKey(job.pendingSellerUrl);
     // 商品任务只把账号页基础资料合并回商品暂存行；完整店铺资料/评价必须由
     // “采集当前店铺页”明确提交，避免店铺表出现只读到首屏资料的半成品。
-    const productProfile = sanitizeStoreProfile(profile, job.pendingSellerUrl || '');
+    const productProfile = sanitizeStoreProfile(profile, job.pendingSellerUrl || '', { forProduct: true });
     const sellerProfiles = {
       ...(job.sellerProfiles || {}),
-      ...(key ? { [key]: productProfile || profile } : {})
+      ...(key ? { [key]: { ...(productProfile || profile), productFieldsLoaded: true } } : {})
     };
     next = mergeStagedItemWithProfile(next, pending, productProfile || profile);
     next = { ...next, sellerProfiles };
@@ -1847,6 +1871,8 @@ async function processAccountPage(job) {
   try {
     const pageInfo = await ensureContentReceiver(job.tabId);
     if (pageInfo?.pageType !== 'account') throw new Error('当前页面不是卖家账号页。');
+    const prepared = await preparePublicPage(job.tabId, 'account', { maxAttempts: 14, timeoutMs: 20_000 });
+    if (!prepared?.ready) throw new Error(prepared?.error || '卖家账号页资料尚未稳定加载。');
     const profile = await readStableAccountProfile(job.tabId);
     return finishPendingSellerStep(job, profile);
   } catch (error) {

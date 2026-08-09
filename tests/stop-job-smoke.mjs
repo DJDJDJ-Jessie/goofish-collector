@@ -113,7 +113,7 @@ const context = vm.createContext({
 
 const source = fs.readFileSync(new URL('../background.js', import.meta.url), 'utf8');
 vm.runInContext(
-  `${source}\n;globalThis.__stopTestApi = { scheduleJob, processJobAlarm, jobFailureRecords, terminalStatus };`,
+  `${source}\n;globalThis.__stopTestApi = { scheduleJob, processJobAlarm, jobFailureRecords, terminalStatus, sanitizeStoreProfile, applyProfileToItem, missingProductFields, isInternalCategory, interactionCount };`,
   context
 );
 
@@ -174,6 +174,37 @@ const partialJob = {
 };
 assert.equal(context.__stopTestApi.jobFailureRecords(partialJob).length, 3, 'detail, seller and field failures must be reported together');
 assert.equal(context.__stopTestApi.terminalStatus('completed', partialJob), 'partial', 'a completed task with failed links must be marked partial');
+
+const productProfile = context.__stopTestApi.sanitizeStoreProfile({
+  sellerName: '测试店铺',
+  sellerUrl: 'https://www.goofish.com/personal?userId=123456789',
+  sellerLocation: '陕西',
+  sellerFollowers: '9',
+  sellerFollowing: '83',
+  sellerProductCount: '22',
+  sellerIntro: '12345',
+  sellerReviewCount: '101',
+  storeDuration: '239天',
+  sellerGoodRate: '100%'
+}, '', { forProduct: true });
+const enrichedProduct = context.__stopTestApi.applyProfileToItem({
+  itemId: '123456789012',
+  itemUrl: 'https://www.goofish.com/item?id=123456789012',
+  description: '商品文案',
+  viewCount: '27',
+  wantCount: '3',
+  price: '80',
+  category: '金融',
+  images: ['https://img.example.com/cover.jpg']
+}, productProfile);
+assert.equal(enrichedProduct.storeDuration, '239天', 'product-only duration must survive profile sanitization');
+assert.equal(enrichedProduct.itemGoodRate, '100%', 'product-only good rate must survive profile sanitization');
+assert.equal(enrichedProduct.sellerIntro, '12345', 'numeric store intro must remain valid text');
+assert.equal(context.__stopTestApi.missingProductFields(enrichedProduct).length, 0, 'a complete product row must not report missing fields');
+assert.equal(context.__stopTestApi.isInternalCategory('50023914'), true, 'plain numeric category IDs must not be exported as human categories');
+assert.equal(context.__stopTestApi.interactionCount('55.00827'), '', 'internal decimal metrics must not enter interaction counts');
+assert.equal(context.__stopTestApi.interactionCount('3'), '3', 'visible integer interaction counts must be preserved');
+assert.equal(context.__stopTestApi.interactionCount('5.5万'), '55000', 'compact ten-thousand counts must be normalized to integers');
 
 console.log(JSON.stringify({
   ok: true,

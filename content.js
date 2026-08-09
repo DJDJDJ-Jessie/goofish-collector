@@ -90,7 +90,13 @@
       object?.goods,
       object?.detail,
       object?.data,
-      object?.model
+      object?.model,
+      object?.main,
+      object?.exContent,
+      object?.detailParams,
+      object?.serviceInfo,
+      object?.sellerInfo,
+      object?.shopInfo
     ];
     for (const container of containers) {
       const value = firstDirectValue(container, keys);
@@ -194,7 +200,8 @@
   }
 
   function isInternalCategory(value) {
-    return /^类目ID\s*\d+$/i.test(oneLine(value || '', 200));
+    const text = oneLine(value || '', 200);
+    return /^类目ID\s*\d+$/i.test(text) || /^\d{5,}$/.test(text);
   }
 
   function preferCategoryValue(oldValue, newValue) {
@@ -318,23 +325,33 @@
       '[class^="item-main-info"], [class*="item-main-info"], [data-testid*="item-main-info"], [class*="detail-main"], [class*="DetailMain"]'
     ) || root;
     const texts = unique([
-      oneLine(detailScope?.textContent || '', 24000),
-      ...textLines(detailScope),
       ...[...(detailScope?.querySelectorAll?.(
         '[aria-label*="想要"], [aria-label*="浏览"], [title*="想要"], [title*="浏览"], [class*="want"], [class*="Want"], [class*="browse"], [class*="Browse"], [class*="view"], [class*="View"]'
       ) || [])].map(node => oneLine(
         node.getAttribute?.('aria-label') || node.getAttribute?.('title') || node.textContent || '',
         300
-      ))
+      )),
+      // innerText/textLines 优先于整块 textContent：整块内容有时还包含接口内部
+      // 的比例值，不能让它排在页面上真正显示的“3人想要/27浏览”前面。
+      ...textLines(detailScope),
+      oneLine(detailScope?.textContent || '', 24000)
     ].filter(Boolean));
 
     function readCount(label) {
       const escapedLabel = label === '想要' ? '想要' : '浏览';
-      const before = new RegExp(`(\\d+(?:\\.\\d+)?\\s*(?:万|w)?)\\s*(?:人|次)?\\s*${escapedLabel}`, 'i');
-      const after = new RegExp(`${escapedLabel}\\s*[:：|｜·•-]?\\s*(\\d+(?:\\.\\d+)?\\s*(?:万|w)?)`, 'i');
+      const before = new RegExp(`(\\d+(?:\\.\\d+)?\\s*(?:万|w)?)\\s*(?:人|次)?\\s*${escapedLabel}`, 'gi');
+      const after = new RegExp(`${escapedLabel}\\s*[:：|｜·•-]?\\s*(\\d+(?:\\.\\d+)?\\s*(?:万|w)?)`, 'gi');
       for (const text of texts) {
-        const match = text.match(before) || text.match(after);
-        if (match) return match[1].replace(/\s+/g, '');
+        const matches = [
+          ...text.matchAll(before),
+          ...text.matchAll(after)
+        ];
+        for (const match of matches) {
+          // 逐个候选交给 countText 校验；无单位小数是接口内部值，
+          // 跳过它后继续找下一个可见节点里的真实整数。
+          const count = countText(match[1]);
+          if (count) return count;
+        }
       }
       return '';
     }
@@ -424,11 +441,14 @@
 
   function categoryFromPage(root = document) {
     const breadcrumbNodes = root.querySelectorAll?.(
-      'nav a, [class*="breadcrumb"] a, [class*="Breadcrumb"] a, [class*="category"] a, [class*="Category"] a'
+      'nav[aria-label*="breadcrumb" i] a, [aria-label*="breadcrumb" i] a, [data-testid*="breadcrumb" i] a, [class^="breadcrumb"] a, [class*=" breadcrumb"] a, [class^="Breadcrumb"] a, [class*=" Breadcrumb"] a, [class*="category-breadcrumb"] a, [class*="categoryPath"] a'
     ) || [];
     const values = unique([...breadcrumbNodes].map(node => oneLine(node.textContent || '', 200)));
     if (values.length > 1) return values.join(' / ');
     if (values[0]) return values[0];
+
+    const labeled = detailAttributeValue(root, ['商品类目', '商品分类', '类目', '分类']);
+    if (labeled && !isInternalCategory(labeled)) return oneLine(labeled, 300);
 
     // URL 中的 categoryId 只是平台内部标识，不是用户看到的类目名称。
     // 如果详情页没有公开展示类目或服务类型，宁可留空，也不把内部 ID 冒充成类目。
@@ -479,14 +499,21 @@
     for (const row of detailAttributeRows(root)) {
       const labelNode = row.querySelector(labelSelector);
       const label = compactLabel(labelNode?.textContent || '');
-      const matched = wanted.find(candidate => label === candidate || label.startsWith(candidate));
+      const rowText = oneLine(row.textContent || '', 800);
+      const compactRow = compactLabel(rowText);
+      const rowLabelStart = wanted
+        .map(candidate => compactRow.indexOf(candidate))
+        .filter(index => index >= 0)
+        .sort((first, second) => first - second)[0];
+      const matched = wanted.find(candidate => label === candidate || label.startsWith(candidate)
+        || compactRow.startsWith(candidate)
+        || (rowLabelStart >= 0 && rowLabelStart <= 24 && compactRow.includes(candidate)));
       if (!matched) continue;
 
       const valueNode = row.querySelector(valueSelector);
       const value = oneLine(valueNode?.textContent || '', 500);
       if (value) return value;
 
-      const compactRow = compactLabel(row.textContent || '');
       const start = compactRow.indexOf(matched);
       if (start >= 0) {
         const remainder = compactRow.slice(start + matched.length);
@@ -500,10 +527,26 @@
     // 闲鱼服务类商品的详情属性区会显示“服务类型：金融”等字段。
     // 这是当前商品最准确的类目来源，优先级高于可见面包屑和 URL 内部标识。
     const stopLabels = ['预计工期', '售后服务', '计价方式'];
-    const detailScope = root?.querySelector?.(
-      '[class^="item-main-info"], [class*="item-main-info"], [class^="item-info"], [class*=" item-info"]'
-    ) || root;
+    const scopeSelector = [
+      '[class^="item-main-info"], [class*="item-main-info"]',
+      '[class^="item-info"], [class*=" item-info"]',
+      '[data-testid*="item-info"], [data-testid*="detail-info"]'
+    ].join(', ');
+    const detailScopes = unique([
+      ...(root?.querySelectorAll?.(scopeSelector) || []),
+      root
+    ].filter(Boolean)).sort((first, second) => {
+      const score = value => {
+        const className = oneLine(value?.getAttribute?.('class') || '', 300);
+        const testId = oneLine(value?.getAttribute?.('data-testid') || '', 200);
+        return /item-main-info/i.test(className) ? 0
+          : /item-info|detail-info/i.test(className + ' ' + testId) ? 1
+            : 2;
+      };
+      return score(first) - score(second);
+    });
 
+    function readServiceTypeFromScope(detailScope) {
     function valueAfterLabel(value) {
       const text = oneLine(value || '', 1000);
       const labelMatch = text.match(/服务(?:类型|类目|类别)/);
@@ -519,7 +562,7 @@
     }
 
     const rowValue = detailAttributeValue(detailScope, ['服务类型', '服务类目', '服务类别']);
-    if (rowValue) return oneLine(rowValue, 300);
+    if (rowValue) return valueAfterLabel(`服务类型${rowValue}`) || oneLine(rowValue, 300);
 
     // 页面版本变化时，服务属性行的 class 会变化，甚至没有 label/value class。
     // 只在短小的语义节点中寻找“服务类型”，不扫描整页推荐商品的文本。
@@ -559,6 +602,13 @@
       }
     }
     return '';
+    }
+
+    for (const detailScope of detailScopes) {
+      const value = readServiceTypeFromScope(detailScope);
+      if (value) return value;
+    }
+    return '';
   }
 
   function extractLabelValue(root, labels) {
@@ -592,7 +642,9 @@
           .replace(/卖家信用(?:优秀|极好|良好|一般|较好)/g, '')
           .replace(/(?:来闲鱼|开店|入驻|经营|卖出|好评率|粉丝|关注)\s*\d+[^\d]*/g, '')
           .trim();
-        if (value && value.length < 100 && !/(?:卖家信用|好评率|粉丝|关注|来闲鱼\d|开店\d)/.test(value)) return value;
+        if (value && value.length < 100
+          && !/^(?:登录|请登录|闲鱼用户|用户)$/i.test(value)
+          && !/(?:卖家信用|好评率|粉丝|关注|来闲鱼\d|开店\d)/.test(value)) return value;
       }
     }
     return extractLabelValue(root, ['卖家', '店铺', '用户', '昵称']);
@@ -659,7 +711,12 @@
 
     // 有些版本把账号页地址写在按钮的 aria-label/title/onclick 文本里。
     // 只有解析出真实 personal URL 才返回，避免把普通链接误认成卖家页。
-    const semanticNodes = [nickNode, ...(nickNode ? [nickNode.parentElement] : [])].filter(Boolean);
+    const semanticNodes = unique([
+      ...nearbyNodes.slice(0, 8),
+      ...(nickNode?.parentElement?.querySelectorAll?.(
+        '[data-url], [data-href], [data-link], [aria-label], [title], [onclick]'
+      ) || [])
+    ]).filter(Boolean);
     for (const node of semanticNodes) {
       const raw = [node.getAttribute?.('data-url'), node.getAttribute?.('data-href'), node.getAttribute?.('aria-label'), node.getAttribute?.('title'), node.getAttribute?.('onclick')]
         .filter(Boolean).join(' ');
@@ -1456,8 +1513,10 @@
     );
     const category = valueToText(firstNestedValue(record, [
       'serviceType', 'service_type', 'serviceCategory', 'serviceCategoryName', 'serviceTypeName',
-      'serviceKind', 'serviceKindName', 'businessType',
-      'categoryName', 'category', 'catName', 'categoryText'
+      'serviceTypeText', 'serviceTypeLabel', 'serviceTypeDesc',
+      'serviceKind', 'serviceKindName', 'businessType', 'businessTypeName',
+      'businessCategory', 'businessCategoryName',
+      'categoryName', 'categoryNameText', 'category', 'catName', 'categoryText', 'categoryDesc'
     ]), 500);
     const reviewSummary = valueToText(firstNestedValue(record, [
       'reviewSummary', 'ratingText', 'creditText', 'sellerCredit', 'evaluation'
@@ -2330,22 +2389,36 @@
             });
             return;
           }
-          document.dispatchEvent(new CustomEvent(API_SNAPSHOT_REQUEST));
-          await delay(180);
-          // 接口响应可能在扩展刚加载前就完成，因此用当前详情 DOM 做一次轻量合并，
-          // 让“接口观察”在旧标签页上也有可解释的回退结果。
-          const domFound = scanDom();
-          const currentItemId = extractItemIdFromUrl(location.href);
-          const detailNetwork = networkBuffer.filter(item => {
-            if (currentItemId) {
-              return cleanText(item?.itemId, 200) === currentItemId
-                || extractItemIdFromUrl(item?.itemUrl || '') === currentItemId;
+          // 接口响应可能在扩展刚加载前完成，也可能在详情 DOM 已经出现后才返回。
+          // 连续观察几轮并与 DOM 合并，避免 API 模式只拿到标题/价格而丢掉类目、卖家入口等字段。
+          const foundByKey = new Map();
+          for (let round = 0; round < 4; round++) {
+            document.dispatchEvent(new CustomEvent(API_SNAPSHOT_REQUEST));
+            await delay(round === 0 ? 220 : 420);
+            const domFound = scanDom();
+            const currentItemId = extractItemIdFromUrl(location.href);
+            const detailNetwork = networkBuffer.filter(item => {
+              if (currentItemId) {
+                return cleanText(item?.itemId, 200) === currentItemId
+                  || extractItemIdFromUrl(item?.itemUrl || '') === currentItemId;
+              }
+              return sameDetailIdentity(item);
+            });
+            for (const item of [...detailNetwork, ...domFound].filter(sameDetailIdentity)) {
+              const key = itemKey(item);
+              const previous = foundByKey.get(key);
+              foundByKey.set(key, previous
+                ? {
+                    ...mergeItemValues(previous, item),
+                    images: unique([...(previous.images || []), ...(item.images || [])]),
+                    reviewSamples: unique([...(previous.reviewSamples || []), ...(item.reviewSamples || [])])
+                  }
+                : item);
             }
-            return sameDetailIdentity(item);
-          });
-          const foundByKey = new Map([...detailNetwork, ...domFound]
-            .filter(sameDetailIdentity)
-            .map(item => [itemKey(item), item]));
+            const best = [...foundByKey.values()][0];
+            if (round >= 1 && best && best.description && best.price
+              && (best.images?.length || best.sellerUrl || best.sellerName)) break;
+          }
           const found = [...foundByKey.values()];
           const result = await sendItems(found, 'api-snapshot', { persistToDataCenter: pagePersistToDataCenter });
           sendResponse({
