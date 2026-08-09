@@ -18,8 +18,14 @@ const item = {
   sellerName: '\u6d4b\u8bd5\u5e97\u94fa',
   collectedAt: '2026-08-08T12:00:00.000Z'
 };
+const invalidApiCountItem = {
+  ...item,
+  itemId: '107391917238',
+  wantCount: '55.00827',
+  viewCount: '5.5万'
+};
 
-const blob = context.window.XianyuXlsx.createWorkbook([item], [], [], {});
+const blob = context.window.XianyuXlsx.createWorkbook([item, invalidApiCountItem], [], [], {});
 const bytes = new Uint8Array(await blob.arrayBuffer());
 
 function readStoredZip(input) {
@@ -51,8 +57,11 @@ for (const header of orderedHeaders) {
 if (!productXml.includes('27') || !productXml.includes('3')) {
   throw new Error('product browse/want counts were not written to the product sheet');
 }
-if ((productXml.match(/<row /g) || []).length !== 2) {
-  throw new Error('product sheet should contain one header row and one item row');
+if (productXml.includes('55.00827') || !productXml.includes('55000')) {
+  throw new Error('invalid decimal interaction counts were not normalized before export');
+}
+if ((productXml.match(/<row /g) || []).length !== 3) {
+  throw new Error('product sheet should contain one header row and two item rows');
 }
 
-console.log(JSON.stringify({ ok: true, productColumns: 20, viewCount: '27', wantCount: '3' }));
+console.log(JSON.stringify({ ok: true, productColumns: 20, viewCount: '27', wantCount: '3', compactViewCount: '55000' }));

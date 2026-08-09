@@ -113,11 +113,16 @@
   function sheetXml(headers, rows, widths = [], options = {}) {
     const allRows = [headers, ...rows];
     const rowHeights = options.rowHeights || {};
+    const textColumns = new Set(options.textColumns || []);
     const rowXml = allRows.map((row, rowIndex) => {
       const style = rowIndex === 0 ? 1 : 0;
       const height = rowHeights[rowIndex + 1];
       const heightAttribute = height ? ` ht="${height}" customHeight="1"` : '';
-      const cells = row.map((value, columnIndex) => cell(`${columnName(columnIndex)}${rowIndex + 1}`, value, style)).join('');
+      const cells = row.map((value, columnIndex) => cell(
+        `${columnName(columnIndex)}${rowIndex + 1}`,
+        value,
+        textColumns.has(columnIndex) && rowIndex > 0 ? 2 : style
+      )).join('');
       return `<row r="${rowIndex + 1}"${heightAttribute}>${cells}</row>`;
     }).join('');
 
@@ -148,11 +153,11 @@
     const goodRate = rateText(item.itemGoodRate || item.goodRate || item.reviewSummary || '');
     const intro = String(item.sellerIntro || '');
     return {
-      itemId: item.itemId || '',
+      itemId: String(item.itemId || ''),
       title: item.title || '',
       description: item.description || '',
-      viewCount: item.viewCount || '',
-      wantCount: item.wantCount || '',
+      viewCount: interactionCount(item.viewCount),
+      wantCount: interactionCount(item.wantCount),
       price: item.price || '',
       category: item.category || '',
       images: list(item.images),
@@ -183,6 +188,19 @@
     if (!match) return '';
     const number = Number(match[1]);
     return Number.isFinite(number) && number >= 0 && number <= 100 ? `${match[1]}%` : '';
+  }
+
+  function interactionCount(value) {
+    const text = String(value ?? '').replace(/\s+/g, '');
+    if (!text) return '';
+    const compact = text.match(/(?:^|[^\d])([\d,]+(?:\.\d+)?)(万|w)(?:人|次|个|条)?/i);
+    if (compact) {
+      const number = Number(compact[1].replace(/,/g, ''));
+      if (Number.isFinite(number) && number >= 0) return String(Math.round(number * 10000));
+    }
+    if (/\d[\d,]*\.\d+/.test(text)) return '';
+    const integer = text.match(/(?:^|[^\d])(\d[\d,]*)(?:人|次|个|条|浏览|想要|收藏)?(?:$|[^\d])/);
+    return integer ? integer[1].replace(/,/g, '') : '';
   }
 
   function toBytes(value) {
@@ -245,7 +263,7 @@
   }
 
   function suggestedProductFileName(item) {
-    const title = cleanFilePart(item.title, item.itemId || '商品');
+    const title = cleanFilePart(item.title || String(item.description || '').split('\n')[0], item.itemId || '商品');
     const seller = cleanFilePart(item.sellerName, '未知店铺');
     const id = cleanFilePart(String(item.itemId || '无ID').slice(-16), '无ID');
     return `${title}_${seller}_${id}_图01.jpg`;
@@ -516,7 +534,8 @@
         {
           name: 'xl/worksheets/sheet1.xml',
           data: sheetXml(storeProfileHeaders, storeProfileRows, [22, 44, 14, 12, 12, 14, 48, 14, 22, 44, 14], {
-            selected: true
+            selected: true,
+            textColumns: [0]
           })
         },
         {
@@ -533,14 +552,16 @@
           data: sheetXml(mainHeaders, mainRows, [18, 44, 48, 20, 64, 12, 12, 12, 22, 22, 44, 14, 12, 12, 14, 42, 14, 18, 14, 22], {
             rowHeights: mainRowHeights,
             drawingRelId: mainDrawing ? 'rId1' : '',
-            selected: true
+            selected: true,
+            textColumns: [0]
           })
         },
         {
           name: 'xl/worksheets/sheet2.xml',
           data: sheetXml(imageHeaders, imageRows, [18, 32, 10, 24, 54, 24, 44, 22, 60], {
             rowHeights: imageRowHeights,
-            drawingRelId: imageDrawing ? 'rId1' : ''
+            drawingRelId: imageDrawing ? 'rId1' : '',
+            textColumns: [0]
           })
         },
         {
@@ -590,7 +611,7 @@
       },
       {
         name: 'xl/styles.xml',
-        data: `${XML_HEADER}<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="10"/><color theme="1"/><name val="Calibri"/></font><font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE54841"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="0" fontId="1" fillId="2" borderId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`
+        data: `${XML_HEADER}<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="10"/><color theme="1"/><name val="Calibri"/></font><font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE54841"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="0" fontId="1" fillId="2" borderId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf><xf numFmtId="49" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`
       },
       ...worksheetFiles
     ];

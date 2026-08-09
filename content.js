@@ -90,7 +90,13 @@
       object?.goods,
       object?.detail,
       object?.data,
-      object?.model
+      object?.model,
+      object?.main,
+      object?.exContent,
+      object?.detailParams,
+      object?.serviceInfo,
+      object?.sellerInfo,
+      object?.shopInfo
     ];
     for (const container of containers) {
       const value = firstDirectValue(container, keys);
@@ -163,9 +169,20 @@
   }
 
   function countText(value) {
-    const text = oneLine(value, 160);
-    const match = text.match(/(\d+(?:\.\d+)?\s*(?:万|w)?)/i);
-    return match ? match[1].replace(/\s+/g, '') : '';
+    const text = oneLine(value, 160).replace(/\s+/g, '');
+    if (!text) return '';
+
+    const compact = text.match(/(?:^|[^\d])([\d,]+(?:\.\d+)?)(万|w)(?:人|次|个|条)?/i);
+    if (compact) {
+      const number = Number(compact[1].replace(/,/g, ''));
+      if (Number.isFinite(number) && number >= 0) return String(Math.round(number * 10000));
+    }
+
+    // 不能把接口中的比例/内部计算值（例如 55.00827）当成“想要数”。
+    // 页面上合法的紧凑写法必须带“万/w”，否则只接受整数。
+    if (/\d[\d,]*\.\d+/.test(text)) return '';
+    const integer = text.match(/(?:^|[^\d])(\d[\d,]*)(?:人|次|个|条|浏览|想要|收藏)?(?:$|[^\d])/);
+    return integer ? integer[1].replace(/,/g, '') : '';
   }
 
   function mergeLocalItem(item) {
@@ -183,7 +200,8 @@
   }
 
   function isInternalCategory(value) {
-    return /^类目ID\s*\d+$/i.test(oneLine(value || '', 200));
+    const text = oneLine(value || '', 200);
+    return /^类目ID\s*\d+$/i.test(text) || /^\d{5,}$/.test(text);
   }
 
   function preferCategoryValue(oldValue, newValue) {
@@ -209,6 +227,11 @@
         }
         continue;
       }
+      if (field === 'viewCount' || field === 'wantCount') {
+        const count = countText(value);
+        if (count) merged[field] = count;
+        continue;
+      }
       // 不让一次异步接口/DOM扫描的空值覆盖已经读到的有效值。
       if (value !== undefined && value !== null && String(value) !== '') merged[field] = value;
     }
@@ -231,7 +254,7 @@
         160
       )),
       price: oneLine(item.price || '', 100),
-      category: oneLine(item.category || '', 500),
+      category: oneLine(item.category || item.serviceType || item.serviceCategory || '', 500),
       images: unique((Array.isArray(item.images) ? item.images : imageUrlsFromValue(item.images))
         .map(toAbsoluteUrl)
         .filter(Boolean)).slice(0, 30),
@@ -302,23 +325,33 @@
       '[class^="item-main-info"], [class*="item-main-info"], [data-testid*="item-main-info"], [class*="detail-main"], [class*="DetailMain"]'
     ) || root;
     const texts = unique([
-      oneLine(detailScope?.textContent || '', 24000),
-      ...textLines(detailScope),
       ...[...(detailScope?.querySelectorAll?.(
         '[aria-label*="想要"], [aria-label*="浏览"], [title*="想要"], [title*="浏览"], [class*="want"], [class*="Want"], [class*="browse"], [class*="Browse"], [class*="view"], [class*="View"]'
       ) || [])].map(node => oneLine(
         node.getAttribute?.('aria-label') || node.getAttribute?.('title') || node.textContent || '',
         300
-      ))
+      )),
+      // innerText/textLines 优先于整块 textContent：整块内容有时还包含接口内部
+      // 的比例值，不能让它排在页面上真正显示的“3人想要/27浏览”前面。
+      ...textLines(detailScope),
+      oneLine(detailScope?.textContent || '', 24000)
     ].filter(Boolean));
 
     function readCount(label) {
       const escapedLabel = label === '想要' ? '想要' : '浏览';
-      const before = new RegExp(`(\\d+(?:\\.\\d+)?\\s*(?:万|w)?)\\s*(?:人|次)?\\s*${escapedLabel}`, 'i');
-      const after = new RegExp(`${escapedLabel}\\s*[:：|｜·•-]?\\s*(\\d+(?:\\.\\d+)?\\s*(?:万|w)?)`, 'i');
+      const before = new RegExp(`(\\d+(?:\\.\\d+)?\\s*(?:万|w)?)\\s*(?:人|次)?\\s*${escapedLabel}`, 'gi');
+      const after = new RegExp(`${escapedLabel}\\s*[:：|｜·•-]?\\s*(\\d+(?:\\.\\d+)?\\s*(?:万|w)?)`, 'gi');
       for (const text of texts) {
-        const match = text.match(before) || text.match(after);
-        if (match) return match[1].replace(/\s+/g, '');
+        const matches = [
+          ...text.matchAll(before),
+          ...text.matchAll(after)
+        ];
+        for (const match of matches) {
+          // 逐个候选交给 countText 校验；无单位小数是接口内部值，
+          // 跳过它后继续找下一个可见节点里的真实整数。
+          const count = countText(match[1]);
+          if (count) return count;
+        }
       }
       return '';
     }
@@ -408,11 +441,14 @@
 
   function categoryFromPage(root = document) {
     const breadcrumbNodes = root.querySelectorAll?.(
-      'nav a, [class*="breadcrumb"] a, [class*="Breadcrumb"] a, [class*="category"] a, [class*="Category"] a'
+      'nav[aria-label*="breadcrumb" i] a, [aria-label*="breadcrumb" i] a, [data-testid*="breadcrumb" i] a, [class^="breadcrumb"] a, [class*=" breadcrumb"] a, [class^="Breadcrumb"] a, [class*=" Breadcrumb"] a, [class*="category-breadcrumb"] a, [class*="categoryPath"] a'
     ) || [];
     const values = unique([...breadcrumbNodes].map(node => oneLine(node.textContent || '', 200)));
     if (values.length > 1) return values.join(' / ');
     if (values[0]) return values[0];
+
+    const labeled = detailAttributeValue(root, ['商品类目', '商品分类', '类目', '分类']);
+    if (labeled && !isInternalCategory(labeled)) return oneLine(labeled, 300);
 
     // URL 中的 categoryId 只是平台内部标识，不是用户看到的类目名称。
     // 如果详情页没有公开展示类目或服务类型，宁可留空，也不把内部 ID 冒充成类目。
@@ -431,8 +467,10 @@
       '[class*="label-list"] [class*="item"]',
       '[class*="item-main-info"] [class^="item--"]',
       '[class*="item-main-info"] [class*=" item--"]',
+      '[class*="item-main-info"] [role="listitem"]',
       '[data-testid*="property"] [role="listitem"]',
-      '[data-testid*="attribute"] [role="listitem"]'
+      '[data-testid*="attribute"] [role="listitem"]',
+      '[role="listitem"]'
     ];
     const rows = [];
     const seen = new Set();
@@ -461,14 +499,21 @@
     for (const row of detailAttributeRows(root)) {
       const labelNode = row.querySelector(labelSelector);
       const label = compactLabel(labelNode?.textContent || '');
-      const matched = wanted.find(candidate => label === candidate || label.startsWith(candidate));
+      const rowText = oneLine(row.textContent || '', 800);
+      const compactRow = compactLabel(rowText);
+      const rowLabelStart = wanted
+        .map(candidate => compactRow.indexOf(candidate))
+        .filter(index => index >= 0)
+        .sort((first, second) => first - second)[0];
+      const matched = wanted.find(candidate => label === candidate || label.startsWith(candidate)
+        || compactRow.startsWith(candidate)
+        || (rowLabelStart >= 0 && rowLabelStart <= 24 && compactRow.includes(candidate)));
       if (!matched) continue;
 
       const valueNode = row.querySelector(valueSelector);
       const value = oneLine(valueNode?.textContent || '', 500);
       if (value) return value;
 
-      const compactRow = compactLabel(row.textContent || '');
       const start = compactRow.indexOf(matched);
       if (start >= 0) {
         const remainder = compactRow.slice(start + matched.length);
@@ -482,15 +527,31 @@
     // 闲鱼服务类商品的详情属性区会显示“服务类型：金融”等字段。
     // 这是当前商品最准确的类目来源，优先级高于可见面包屑和 URL 内部标识。
     const stopLabels = ['预计工期', '售后服务', '计价方式'];
-    const detailScope = root?.querySelector?.(
-      '[class^="item-main-info"], [class*="item-main-info"], [class^="item-info"], [class*=" item-info"]'
-    ) || root;
+    const scopeSelector = [
+      '[class^="item-main-info"], [class*="item-main-info"]',
+      '[class^="item-info"], [class*=" item-info"]',
+      '[data-testid*="item-info"], [data-testid*="detail-info"]'
+    ].join(', ');
+    const detailScopes = unique([
+      ...(root?.querySelectorAll?.(scopeSelector) || []),
+      root
+    ].filter(Boolean)).sort((first, second) => {
+      const score = value => {
+        const className = oneLine(value?.getAttribute?.('class') || '', 300);
+        const testId = oneLine(value?.getAttribute?.('data-testid') || '', 200);
+        return /item-main-info/i.test(className) ? 0
+          : /item-info|detail-info/i.test(className + ' ' + testId) ? 1
+            : 2;
+      };
+      return score(first) - score(second);
+    });
 
+    function readServiceTypeFromScope(detailScope) {
     function valueAfterLabel(value) {
       const text = oneLine(value || '', 1000);
-      const labelIndex = text.indexOf('服务类型');
-      if (labelIndex < 0) return '';
-      let result = text.slice(labelIndex + '服务类型'.length)
+      const labelMatch = text.match(/服务(?:类型|类目|类别)/);
+      if (!labelMatch) return '';
+      let result = text.slice(labelMatch.index + labelMatch[0].length)
         .replace(/^[\s:：|｜·•\-]+/, '')
         .trim();
       const stopAt = stopLabels
@@ -500,22 +561,29 @@
       return oneLine(result, 300);
     }
 
-    const rowValue = detailAttributeValue(detailScope, ['服务类型']);
-    if (rowValue) return oneLine(rowValue, 300);
+    const rowValue = detailAttributeValue(detailScope, ['服务类型', '服务类目', '服务类别']);
+    if (rowValue) return valueAfterLabel(`服务类型${rowValue}`) || oneLine(rowValue, 300);
 
     // 页面版本变化时，服务属性行的 class 会变化，甚至没有 label/value class。
     // 只在短小的语义节点中寻找“服务类型”，不扫描整页推荐商品的文本。
-    const nodes = [...(detailScope?.querySelectorAll?.('*') || [])]
+    const nodes = [...(detailScope?.querySelectorAll?.(
+      '* , [class*="service"], [class*="Service"], [class*="attribute"], [class*="Attribute"], [class*="property"], [class*="Property"]'
+    ) || [])]
       .filter(node => {
         const text = oneLine(node.textContent || '', 1000);
-        return text.includes('服务类型') && text.length <= 500;
+        const className = oneLine(node.getAttribute?.('class') || '', 200);
+        return /服务(?:类型|类目|类别)/.test(text)
+          && text.length <= 700
+          && !/(?:desc|description|detail-content)/i.test(className);
       })
       .sort((first, second) => oneLine(first.textContent || '').length - oneLine(second.textContent || '').length);
     for (const node of nodes) {
-      const value = valueAfterLabel(node.textContent || '');
+      const value = valueAfterLabel(node.textContent || '')
+        || valueAfterLabel(node.getAttribute?.('aria-label') || '')
+        || valueAfterLabel(node.getAttribute?.('title') || '');
       if (value) return value;
       const childTexts = [...(node.children || [])].map(child => oneLine(child.textContent || '', 300)).filter(Boolean);
-      const labelIndex = childTexts.findIndex(text => text.includes('服务类型'));
+      const labelIndex = childTexts.findIndex(text => /服务(?:类型|类目|类别)/.test(text));
       if (labelIndex >= 0) {
         const same = valueAfterLabel(childTexts[labelIndex]);
         if (same) return same;
@@ -528,10 +596,17 @@
     for (let index = 0; index < lines.length; index++) {
       const value = valueAfterLabel(lines[index]);
       if (value) return value;
-      if (/^服务类型\s*[:：|｜·•\-]?\s*$/.test(lines[index])) {
+      if (/^服务(?:类型|类目|类别)\s*[:：|｜·•\-]?\s*$/.test(lines[index])) {
         const next = lines[index + 1] || '';
         if (next && !stopLabels.some(label => next.includes(label))) return oneLine(next, 300);
       }
+    }
+    return '';
+    }
+
+    for (const detailScope of detailScopes) {
+      const value = readServiceTypeFromScope(detailScope);
+      if (value) return value;
     }
     return '';
   }
@@ -554,17 +629,23 @@
 
   function sellerNameFromRoot(root) {
     const selectors = [
+      '[class^="nick--"]', '[class*=" nick--"]',
       '[class*="item-user-info-nick"]',
-      'a[href*="/user"]', 'a[href*="/seller"]',
-      '[data-testid*="seller"]', '[data-testid*="user"]',
-      '[class*="seller"]', '[class*="Seller"]',
       '[class*="user-name"]', '[class*="UserName"]',
-      '[class*="shop-name"]', '[class*="ShopName"]'
+      '[class*="shop-name"]', '[class*="ShopName"]',
+      'a[href*="/personal"]', 'a[href*="/user"]', 'a[href*="/seller"]',
+      '[data-testid*="seller"]', '[data-testid*="user"]'
     ];
     for (const selector of selectors) {
-      const node = root?.querySelector?.(selector);
-      const value = oneLine(node?.textContent || node?.getAttribute?.('title') || '', 500);
-      if (value && value.length < 100) return value;
+      for (const node of root?.querySelectorAll?.(selector) || []) {
+        const value = oneLine(node.textContent || node.getAttribute?.('title') || '', 500)
+          .replace(/卖家信用(?:优秀|极好|良好|一般|较好)/g, '')
+          .replace(/(?:来闲鱼|开店|入驻|经营|卖出|好评率|粉丝|关注)\s*\d+[^\d]*/g, '')
+          .trim();
+        if (value && value.length < 100
+          && !/^(?:登录|请登录|闲鱼用户|用户)$/i.test(value)
+          && !/(?:卖家信用|好评率|粉丝|关注|来闲鱼\d|开店\d)/.test(value)) return value;
+      }
     }
     return extractLabelValue(root, ['卖家', '店铺', '用户', '昵称']);
   }
@@ -585,13 +666,13 @@
     if (!root?.querySelectorAll) return null;
 
     const nickNode = root.querySelector(
-      '[class*="item-user-info-nick"], [data-testid*="seller"], [data-testid*="user"], [class*="seller-name"], [class*="shop-name"]'
+      '[class^="nick--"], [class*=" nick--"], [class*="item-user-info-nick"], [data-testid*="seller"], [data-testid*="user"], [class*="seller-name"], [class*="shop-name"]'
     );
-    const nearestAnchor = nickNode?.closest?.('a[href]');
-    if (nearestAnchor && isSellerPageUrl(nearestAnchor.href)) return nearestAnchor;
+    const nearestAnchor = nickNode?.closest?.('a');
+    if (nearestAnchor && isSellerPageUrl(nearestAnchor.href || nearestAnchor.getAttribute('href') || '')) return nearestAnchor;
 
-    const candidates = [...root.querySelectorAll('a[href]')]
-      .filter(anchor => isSellerPageUrl(anchor.href))
+    const candidates = [...root.querySelectorAll('a')]
+      .filter(anchor => isSellerPageUrl(anchor.href || anchor.getAttribute('href') || ''))
       .map(anchor => {
         const text = oneLine(anchor.textContent || '', 800);
         const hasSellerStats = /(?:来闲鱼|开店|入驻|卖出|好评率|粉丝|关注)/.test(text);
@@ -605,17 +686,67 @@
       })
       .sort((first, second) => second.score - first.score);
 
-    return candidates[0]?.anchor || null;
+    if (candidates[0]?.anchor) return candidates[0].anchor;
+
+    // 部分新版详情页把昵称做成可点击 div，真实账号 ID 放在 data-* 属性中，
+    // 不再渲染成 a[href]。这里只使用页面已经公开的 userId，不根据昵称猜 URL。
+    const nearbyNodes = [];
+    for (let node = nickNode; node && nearbyNodes.length < 30; node = node.parentElement) nearbyNodes.push(node);
+    const dataNodes = [
+      ...nearbyNodes,
+      ...(nickNode ? [...(nickNode.parentElement?.querySelectorAll?.('*') || [])] : []),
+      ...[...(root.querySelectorAll('[data-user-id], [data-userid], [data-seller-id], [data-sellerid], [data-shop-id], [data-shopid]') || [])]
+    ];
+    for (const node of dataNodes) {
+      if (!node) continue;
+      const attrs = [...(node.attributes || [])];
+      const userAttribute = attrs.find(attribute => /^(?:data-)?(?:user[-_]?id|seller[-_]?id|shop[-_]?id)$/i.test(attribute.name));
+      const userId = oneLine(userAttribute?.value || '', 200).match(/^\d{5,}$/)?.[0];
+      if (!userId) continue;
+      const anchor = document.createElement('a');
+      anchor.href = `https://www.goofish.com/personal?userId=${encodeURIComponent(userId)}`;
+      anchor.textContent = node.textContent || '';
+      return anchor;
+    }
+
+    // 有些版本把账号页地址写在按钮的 aria-label/title/onclick 文本里。
+    // 只有解析出真实 personal URL 才返回，避免把普通链接误认成卖家页。
+    const semanticNodes = unique([
+      ...nearbyNodes.slice(0, 8),
+      ...(nickNode?.parentElement?.querySelectorAll?.(
+        '[data-url], [data-href], [data-link], [aria-label], [title], [onclick]'
+      ) || [])
+    ]).filter(Boolean);
+    for (const node of semanticNodes) {
+      const raw = [node.getAttribute?.('data-url'), node.getAttribute?.('data-href'), node.getAttribute?.('aria-label'), node.getAttribute?.('title'), node.getAttribute?.('onclick')]
+        .filter(Boolean).join(' ');
+      const match = raw.match(/(?:https?:\/\/[^\s"']+)?\/personal\?[^\s"']*userId=\d{5,}[^\s"']*/i);
+      if (match && isSellerPageUrl(match[0])) {
+        const anchor = document.createElement('a');
+        anchor.href = toAbsoluteUrl(match[0]);
+        anchor.textContent = node.textContent || '';
+        return anchor;
+      }
+      const idMatch = raw.match(/(?:user[-_]?id|seller[-_]?id|shop[-_]?id)[^\d]{0,8}(\d{5,})/i)
+        || raw.match(/(?:open|go|to)(?:User|Seller|Shop)\s*\(\s*(\d{5,})\s*\)/i);
+      if (idMatch?.[1]) {
+        const anchor = document.createElement('a');
+        anchor.href = `https://www.goofish.com/personal?userId=${encodeURIComponent(idMatch[1])}`;
+        anchor.textContent = node.textContent || '';
+        return anchor;
+      }
+    }
+    return null;
   }
 
   function sellerEntryFromRoot(root) {
     const anchor = sellerAnchorFromRoot(root);
     const nickNode = root?.querySelector?.(
-      '[class*="item-user-info-nick"], [data-testid*="seller"], [data-testid*="user"], [class*="seller-name"], [class*="shop-name"]'
+      '[class^="nick--"], [class*=" nick--"], [class*="item-user-info-nick"], [data-testid*="seller"], [data-testid*="user"], [class*="seller-name"], [class*="shop-name"]'
     );
     return {
-      sellerName: oneLine(nickNode?.textContent || anchor?.textContent || sellerNameFromRoot(root), 500),
-      sellerUrl: anchor && isSellerPageUrl(anchor.href) ? toAbsoluteUrl(anchor.href) : '',
+      sellerName: sellerNameFromRoot(root) || oneLine(nickNode?.textContent || anchor?.textContent || '', 500),
+      sellerUrl: anchor && isSellerPageUrl(anchor.href || anchor.getAttribute('href')) ? toAbsoluteUrl(anchor.href || anchor.getAttribute('href')) : '',
       clickable: Boolean(anchor || nickNode),
       text: oneLine(anchor?.textContent || nickNode?.parentElement?.textContent || '', 1000)
     };
@@ -994,17 +1125,17 @@
     const productHeaderCount = productHeaderText.match(/(?:卖出|出售)\s*(\d+)|(\d+)\s*件?\s*宝贝/);
     const productHeaderValue = productHeaderCount?.[1] || productHeaderCount?.[2] || '';
     const locationCandidates = unique([
-      ...infoValues,
-      ...statLines.map(value => value
+      ...infoValues.flatMap(value => value.split(/[|｜·•,，]/).map(part => part.trim())),
+      ...statLines.flatMap(value => value
         .replace(/\d{1,9}\s*粉丝/g, '')
         .replace(/\d{1,9}\s*关注/g, '')
-        .replace(/[|｜·•,，]/g, ' ')
-        .trim())
+        .split(/[|｜·•,，]/)
+        .map(part => part.trim()))
     ]);
     const locationText = locationCandidates.find(value => (
       value && value.length <= 100
       && !/^\d+(?:\.\d+)?$/.test(value)
-      && !/(粉丝|关注|宝贝|信用及评价|好评率)/.test(value)
+      && !/(粉丝|关注|宝贝|信用及评价|好评率|来闲鱼|开店|入驻|经营)/.test(value)
     )) || '';
     const profileRoot = infoScope || root;
 
@@ -1381,7 +1512,11 @@
       500
     );
     const category = valueToText(firstNestedValue(record, [
-      'categoryName', 'category', 'catName', 'categoryText'
+      'serviceType', 'service_type', 'serviceCategory', 'serviceCategoryName', 'serviceTypeName',
+      'serviceTypeText', 'serviceTypeLabel', 'serviceTypeDesc',
+      'serviceKind', 'serviceKindName', 'businessType', 'businessTypeName',
+      'businessCategory', 'businessCategoryName',
+      'categoryName', 'categoryNameText', 'category', 'catName', 'categoryText', 'categoryDesc'
     ]), 500);
     const reviewSummary = valueToText(firstNestedValue(record, [
       'reviewSummary', 'ratingText', 'creditText', 'sellerCredit', 'evaluation'
@@ -1410,6 +1545,11 @@
     if (!itemId && !/\/item(?:[/?#]|$)/i.test(itemUrl)) return null;
     if (!title && !images.length && !price) return null;
 
+    const sellerUrl = toAbsoluteUrl(valueToText(
+      firstDirectValue(sellerObject, ['url', 'userUrl', 'shopUrl', 'sellerUrl', 'profileUrl'])
+        || firstNestedValue(record, ['sellerUrl', 'sellerPageUrl', 'userUrl', 'shopUrl', 'profileUrl']),
+      2000
+    ));
     const normalized = normalizeItem({
       itemId,
       title,
@@ -1421,8 +1561,11 @@
       images,
       itemUrl,
       sellerName,
-      sellerUrl: toAbsoluteUrl(valueToText(firstDirectValue(sellerObject, ['url', 'userUrl', 'shopUrl']), 2000)),
+      sellerUrl,
       sellerLocation: valueToText(firstNestedValue(record, ['area', 'location', 'sellerLocation']), 300),
+      sellerFollowers: valueToText(firstNestedValue(record, ['sellerFollowers', 'followers', 'fansCount', 'fanCount']), 100),
+      sellerFollowing: valueToText(firstNestedValue(record, ['sellerFollowing', 'following', 'followCount']), 100),
+      sellerProductCount: valueToText(firstNestedValue(record, ['sellerProductCount', 'productCount', 'itemCount', 'goodsCount']), 100),
       sellerIntro: valueToText(firstDirectValue(sellerObject, ['intro', 'description', 'bio', 'shopIntro']), 3000),
       storeDuration: valueToText(firstNestedValue(record, ['storeDuration', 'openDuration', 'shopAge', 'registerDuration']), 300),
       reviewSummary,
@@ -1759,13 +1902,14 @@
     if (!isDetailPage()) return false;
     const item = buildDetailItem();
     if (!item || !sameDetailIdentity(item)) return false;
-    return [
-      item.description,
-      item.price,
-      item.sellerName,
-      item.sellerUrl,
-      Array.isArray(item.images) && item.images.length ? 'images' : ''
-    ].filter(Boolean).length >= 3;
+    const hasDescription = Boolean(item.description || item.title);
+    const hasPrice = Boolean(item.price);
+    const hasSeller = Boolean(item.sellerName && item.sellerUrl);
+    const hasImages = Array.isArray(item.images) && item.images.length > 0;
+    // 页面刚打开时经常先出现价格、昵称和一段骨架文案，但图片/卖家链接
+    // 仍未挂载。只把“有图片”或“有完整卖家入口”的详情页视为可采集，
+    // 避免把半成品写入商品表后再也没有机会补齐。
+    return hasDescription && (hasPrice || hasImages) && (hasImages || hasSeller);
   }
 
   function accountPageLooksReady() {
@@ -2245,22 +2389,36 @@
             });
             return;
           }
-          document.dispatchEvent(new CustomEvent(API_SNAPSHOT_REQUEST));
-          await delay(180);
-          // 接口响应可能在扩展刚加载前就完成，因此用当前详情 DOM 做一次轻量合并，
-          // 让“接口观察”在旧标签页上也有可解释的回退结果。
-          const domFound = scanDom();
-          const currentItemId = extractItemIdFromUrl(location.href);
-          const detailNetwork = networkBuffer.filter(item => {
-            if (currentItemId) {
-              return cleanText(item?.itemId, 200) === currentItemId
-                || extractItemIdFromUrl(item?.itemUrl || '') === currentItemId;
+          // 接口响应可能在扩展刚加载前完成，也可能在详情 DOM 已经出现后才返回。
+          // 连续观察几轮并与 DOM 合并，避免 API 模式只拿到标题/价格而丢掉类目、卖家入口等字段。
+          const foundByKey = new Map();
+          for (let round = 0; round < 4; round++) {
+            document.dispatchEvent(new CustomEvent(API_SNAPSHOT_REQUEST));
+            await delay(round === 0 ? 220 : 420);
+            const domFound = scanDom();
+            const currentItemId = extractItemIdFromUrl(location.href);
+            const detailNetwork = networkBuffer.filter(item => {
+              if (currentItemId) {
+                return cleanText(item?.itemId, 200) === currentItemId
+                  || extractItemIdFromUrl(item?.itemUrl || '') === currentItemId;
+              }
+              return sameDetailIdentity(item);
+            });
+            for (const item of [...detailNetwork, ...domFound].filter(sameDetailIdentity)) {
+              const key = itemKey(item);
+              const previous = foundByKey.get(key);
+              foundByKey.set(key, previous
+                ? {
+                    ...mergeItemValues(previous, item),
+                    images: unique([...(previous.images || []), ...(item.images || [])]),
+                    reviewSamples: unique([...(previous.reviewSamples || []), ...(item.reviewSamples || [])])
+                  }
+                : item);
             }
-            return sameDetailIdentity(item);
-          });
-          const foundByKey = new Map([...detailNetwork, ...domFound]
-            .filter(sameDetailIdentity)
-            .map(item => [itemKey(item), item]));
+            const best = [...foundByKey.values()][0];
+            if (round >= 1 && best && best.description && best.price
+              && (best.images?.length || best.sellerUrl || best.sellerName)) break;
+          }
           const found = [...foundByKey.values()];
           const result = await sendItems(found, 'api-snapshot', { persistToDataCenter: pagePersistToDataCenter });
           sendResponse({
@@ -2338,7 +2496,7 @@
     }
 
     if (message?.type === 'GET_SELLER_ENTRY') {
-      preparePublicPage('detail', 10).then(prepared => {
+      preparePublicPage('detail', 14).then(prepared => {
         if (!prepared.ready || !isDetailPage()) {
           sendResponse({ ok: false, pageType: pageType(), error: prepared.error || '当前不是商品详情页。' });
           return;

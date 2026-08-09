@@ -399,6 +399,14 @@ https://www.goofish.com/item?id=…"></textarea>
 
             <div class="task-filter"><span class="filter-icon">⌕</span><span id="taskFilterText">当前未进行任何筛选</span><span class="filter-chip">全部数据</span></div>
 
+            <section id="taskFailureCard" class="task-failure-card" hidden>
+              <div class="task-failure-heading"><strong>未成功链接</strong><span id="taskFailureCount">0</span></div>
+              <p class="task-failure-note">详情页失败、店铺资料补充失败和字段待补充都会记录在这里，不会悄悄跳过。</p>
+              <p class="task-failure-note">说明：这里是采集质量告警，不等于闲鱼一定没有该字段。只有页面明确显示“暂无”或“未公开”时，才能判断为页面未公开；如果只是没有读到，可能是延迟加载、页面结构变化或字段本身未公开。</p>
+              <div id="taskFailureList" class="task-failure-list"></div>
+              <button id="copyFailedLinksButton" class="button outline-action" type="button">复制失败链接</button>
+            </section>
+
             <div class="task-actions">
               <button id="stopJobButton" class="button outline-action" type="button" disabled>停止任务</button>
               <button id="taskCommitButton" class="button teal-action large" type="button" disabled>加到数据中心商品表</button>
