@@ -34,6 +34,9 @@
   let currentStoreCommitted = false;
   let dataTab = 'products';
   let currentTaskJob = null;
+  let monitorKind = 'product';
+  let editingMonitorId = '';
+  let monitorConfigs = [];
 
   const SCREEN_META = {
     home: { kicker: 'WORKSPACE', title: '闲鱼研究助手', subtitle: '从公开详情页整理同行商品与店铺信息' },
@@ -44,6 +47,7 @@
     data: { kicker: 'LOCAL DATASET', title: '数据中心', subtitle: '查看记录、下载 Excel 和图片索引' },
     history: { kicker: 'TASK ARCHIVE', title: '采集历史', subtitle: '查看任务结果，重新导出或删除' },
     settings: { kicker: 'WORKSPACE SETTINGS', title: '下载与字段设置', subtitle: '控制下载方式、图片和卖家公开资料' },
+    monitor: { kicker: 'MONITORING DESK', title: '商品监控', subtitle: '按每日计划获取商品或店铺公开数据' },
     task: { kicker: 'TASK RUNNER', title: '处理任务', subtitle: '查看逐个详情页的采集进度' }
   };
 
@@ -179,6 +183,284 @@
     $('dataStoresPanel')?.classList.toggle('is-hidden', products);
   }
 
+  function monitorKindText(kind = monitorKind) {
+    return kind === 'store' ? '店铺' : '商品';
+  }
+
+  function monitorLinkValidator(kind, value) {
+    return kind === 'store' ? isAccountUrl(value) : isDetailUrl(value);
+  }
+
+  function parseMonitorLinks(value, kind = monitorKind) {
+    return [...new Set(String(value || '')
+      .split(/[\s,]+/)
+      .map(text => text.trim())
+      .filter(Boolean)
+      .filter(url => isGoofishUrl(url) && monitorLinkValidator(kind, url)))];
+  }
+
+  function monitorDefaultFolder(kind = monitorKind) {
+    return kind === 'store' ? '闲鱼研究监控/店铺' : '闲鱼研究监控/商品';
+  }
+
+  function monitorTimeText(config) {
+    return `${String(config?.hour ?? 0).padStart(2, '0')}:${String(config?.minute ?? 0).padStart(2, '0')}`;
+  }
+
+  function monitorStatusText(config) {
+    if (config.running && config.run) return `运行中 · ${config.run.index}/${config.run.total}`;
+    if (!config.enabled) return '已暂停';
+    if (config.lastRunStatus === 'partial') return '上次部分完成';
+    if (config.lastRunStatus === 'failed') return '上次失败';
+    if (config.lastRunStatus === 'completed') return '已启用';
+    return '已启用';
+  }
+
+  function monitorStatusClass(config) {
+    if (config.running) return 'running';
+    if (config.lastRunStatus === 'partial') return 'partial';
+    if (config.lastRunStatus === 'failed') return 'failed';
+    return config.enabled ? 'enabled' : '';
+  }
+
+  function renderMonitorKind() {
+    const isStore = monitorKind === 'store';
+    $('monitorProductEntry')?.classList.toggle('is-selected', !isStore);
+    $('monitorStoreEntry')?.classList.toggle('is-selected', isStore);
+    $('monitorProductEntry')?.setAttribute('aria-selected', String(!isStore));
+    $('monitorStoreEntry')?.setAttribute('aria-selected', String(isStore));
+    if ($('monitorPageTitle')) $('monitorPageTitle').textContent = `${monitorKindText()}监控`;
+    if ($('monitorPageSubtitle')) $('monitorPageSubtitle').textContent = isStore
+      ? '每天按设定时间打开店铺页，读取店铺资料、公开评价和评价图片后自动下载店铺表。'
+      : '每天按设定时间打开商品详情页，补充卖家公开资料后自动下载商品表。';
+    if ($('monitorFormTitle')) $('monitorFormTitle').textContent = `新建${monitorKindText()}监控`;
+    if ($('monitorLinksLabel')) $('monitorLinksLabel').firstChild.textContent = `${isStore ? '店铺链接' : '商品详情链接'} `;
+    if ($('monitorLinkHint')) $('monitorLinkHint').textContent = isStore ? '只接受闲鱼店铺/账号页链接' : '只接受闲鱼商品详情链接';
+    if ($('monitorLinksInput')) $('monitorLinksInput').placeholder = isStore
+      ? 'https://www.goofish.com/personal?userId=...'
+      : 'https://www.goofish.com/item?id=...';
+    if ($('monitorFolder') && !editingMonitorId && !$('monitorFolder').value) {
+      $('monitorFolder').value = monitorDefaultFolder();
+    }
+    if ($('monitorModeNote')) $('monitorModeNote').textContent = `保存时使用：${modeLabel(selectedMode)}`;
+    const count = parseMonitorLinks($('monitorLinksInput')?.value || '', monitorKind).length;
+    if ($('monitorLinkCount')) $('monitorLinkCount').textContent = `${count} 个有效链接`;
+  }
+
+  function clearMonitorForm() {
+    editingMonitorId = '';
+    if ($('monitorName')) $('monitorName').value = '';
+    if ($('monitorLinksInput')) $('monitorLinksInput').value = '';
+    if ($('monitorTime')) $('monitorTime').value = '09:00';
+    if ($('monitorFolder')) $('monitorFolder').value = monitorDefaultFolder();
+    if ($('monitorSaveButton')) $('monitorSaveButton').textContent = '保存并开始监控';
+    $('monitorCancelEditButton')?.classList.add('is-hidden');
+    if ($('monitorFormStatus')) $('monitorFormStatus').textContent = '保存后会立即建立每日计划；第一次运行将在下一个设定时间开始。';
+    renderMonitorKind();
+  }
+
+  function editMonitor(config) {
+    monitorKind = config.kind === 'store' ? 'store' : 'product';
+    editingMonitorId = config.id || '';
+    if ($('monitorName')) $('monitorName').value = config.name || '';
+    if ($('monitorLinksInput')) $('monitorLinksInput').value = (config.links || []).join('\n');
+    if ($('monitorTime')) $('monitorTime').value = monitorTimeText(config);
+    if ($('monitorFolder')) $('monitorFolder').value = config.downloadFolder || monitorDefaultFolder();
+    if ($('monitorSaveButton')) $('monitorSaveButton').textContent = '保存修改并继续监控';
+    $('monitorCancelEditButton')?.classList.remove('is-hidden');
+    if ($('monitorFormStatus')) $('monitorFormStatus').textContent = '正在编辑这条监控，保存后下一轮会使用新的链接和时间。';
+    renderMonitorKind();
+    $('monitorName')?.focus();
+  }
+
+  function setMonitorKind(kind, resetForm = true) {
+    const next = kind === 'store' ? 'store' : 'product';
+    if (next !== monitorKind && resetForm) {
+      monitorKind = next;
+      clearMonitorForm();
+      return;
+    }
+    monitorKind = next;
+    renderMonitorKind();
+  }
+
+  function renderMonitorList() {
+    const list = $('monitorList');
+    if (!list) return;
+    list.replaceChildren();
+    if (!monitorConfigs.length) {
+      const empty = document.createElement('p');
+      empty.className = 'empty-state';
+      empty.textContent = '还没有保存的监控配置。';
+      list.append(empty);
+      return;
+    }
+
+    for (const config of monitorConfigs) {
+      const card = document.createElement('article');
+      card.className = `monitor-item${config.running ? ' is-running' : ''}`;
+
+      const top = document.createElement('div');
+      top.className = 'monitor-item-top';
+      const title = document.createElement('div');
+      title.className = 'monitor-item-title';
+      const name = document.createElement('strong');
+      name.textContent = config.name || `${monitorKindText(config.kind)}监控`;
+      const type = document.createElement('small');
+      type.textContent = `${monitorKindText(config.kind)}监控 · 保存时使用${config.mode === 'api' ? ' API 模式' : '页面详情模式'}`;
+      title.append(name, type);
+      const state = document.createElement('span');
+      state.className = `monitor-state ${monitorStatusClass(config)}`.trim();
+      state.textContent = monitorStatusText(config);
+      top.append(title, state);
+
+      const meta = document.createElement('p');
+      meta.className = 'monitor-item-meta';
+      const schedule = document.createElement('span');
+      const scheduleStrong = document.createElement('strong');
+      scheduleStrong.textContent = `每天 ${monitorTimeText(config)}`;
+      schedule.append(
+        scheduleStrong,
+        document.createTextNode(` · ${config.links?.length || 0} 个链接 · ${config.downloadFolder || '默认文件夹'}`)
+      );
+      meta.append(schedule);
+      if (config.running && config.run) {
+        const progress = document.createElement('span');
+        progress.textContent = config.run.message || `已处理 ${config.run.index}/${config.run.total}`;
+        meta.append(progress);
+      } else if (config.lastRunAt) {
+        const last = document.createElement('span');
+        last.textContent = `上次运行：${formatDate(config.lastRunAt)} · ${config.lastRunMessage || '无附加说明'}`;
+        meta.append(last);
+      } else {
+        const next = document.createElement('span');
+        next.textContent = config.enabled && config.nextRunAt ? `下次运行：${formatDate(config.nextRunAt)}` : '当前未安排运行';
+        meta.append(next);
+      }
+
+      const url = document.createElement('p');
+      url.className = 'monitor-item-url';
+      url.textContent = config.links?.[0] ? `${config.links[0]}${config.links.length > 1 ? `  +${config.links.length - 1}` : ''}` : '没有有效链接';
+
+      const actions = document.createElement('div');
+      actions.className = 'monitor-item-actions';
+      const runButton = document.createElement('button');
+      runButton.type = 'button';
+      runButton.className = 'primary-action';
+      runButton.textContent = config.running ? '正在运行' : '立即运行';
+      runButton.disabled = Boolean(config.running);
+      runButton.addEventListener('click', () => runMonitorNow(config.id));
+      const editButton = document.createElement('button');
+      editButton.type = 'button';
+      editButton.textContent = '编辑';
+      editButton.addEventListener('click', () => editMonitor(config));
+      const toggleButton = document.createElement('button');
+      toggleButton.type = 'button';
+      toggleButton.textContent = config.enabled ? '暂停' : '启用';
+      toggleButton.addEventListener('click', () => toggleMonitor(config));
+      const deleteButton = document.createElement('button');
+      deleteButton.type = 'button';
+      deleteButton.className = 'danger-action';
+      deleteButton.textContent = '删除';
+      deleteButton.addEventListener('click', () => deleteMonitor(config));
+      actions.append(runButton, editButton, toggleButton, deleteButton);
+
+      card.append(top, meta, url, actions);
+      list.append(card);
+    }
+  }
+
+  async function refreshMonitors() {
+    const response = await sendRuntime({ type: 'GET_MONITORS' });
+    if (!response?.ok) throw new Error(response?.error || '读取监控配置失败');
+    monitorConfigs = Array.isArray(response.monitors) ? response.monitors : [];
+    renderMonitorList();
+    renderMonitorKind();
+  }
+
+  async function saveMonitor() {
+    const links = parseMonitorLinks($('monitorLinksInput')?.value || '', monitorKind);
+    if (!links.length) {
+      setStatus(`请至少填写一个有效的${monitorKindText()}链接。`, 'error');
+      return;
+    }
+    const time = String($('monitorTime')?.value || '09:00').split(':');
+    const hour = Math.max(0, Math.min(23, Number(time[0]) || 0));
+    const minute = Math.max(0, Math.min(59, Number(time[1]) || 0));
+    const button = $('monitorSaveButton');
+    if (button) {
+      button.disabled = true;
+      button.textContent = '正在保存监控…';
+    }
+    try {
+      const response = await sendRuntime({
+        type: 'SAVE_MONITOR',
+        monitor: {
+          id: editingMonitorId || undefined,
+          kind: monitorKind,
+          name: $('monitorName')?.value || `${monitorKindText()}监控`,
+          links,
+          hour,
+          minute,
+          downloadFolder: $('monitorFolder')?.value || monitorDefaultFolder(),
+          mode: selectedMode,
+          enabled: true
+        }
+      });
+      if (!response?.ok) throw new Error(response?.error || '保存监控失败');
+      monitorConfigs = Array.isArray(response.monitors) ? response.monitors : [];
+      const savedName = response.monitor?.name || `${monitorKindText()}监控`;
+      clearMonitorForm();
+      renderMonitorList();
+      setStatus(`监控“${savedName}”已保存并启用；每天 ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} 自动运行。`, 'success');
+    } catch (error) {
+      setStatus(error.message || '保存监控失败', 'error');
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = editingMonitorId ? '保存修改并继续监控' : '保存并开始监控';
+      }
+    }
+  }
+
+  async function runMonitorNow(id) {
+    try {
+      const response = await sendRuntime({ type: 'RUN_MONITOR_NOW', monitorId: id });
+      if (!response?.ok) throw new Error(response?.error || '启动监控失败');
+      setStatus('监控已启动；插件会在后台逐条打开链接，完成后自动下载并显示通知。', 'success');
+      await refreshMonitors();
+    } catch (error) {
+      setStatus(error.message || '启动监控失败', 'error');
+      await refreshMonitors().catch(() => {});
+    }
+  }
+
+  async function toggleMonitor(config) {
+    try {
+      const response = await sendRuntime({ type: 'SET_MONITOR_ENABLED', monitorId: config.id, enabled: !config.enabled });
+      if (!response?.ok) throw new Error(response?.error || '更新监控状态失败');
+      monitorConfigs = Array.isArray(response.monitors) ? response.monitors : [];
+      renderMonitorList();
+      setStatus(`${config.name || '监控'}已${config.enabled ? '暂停' : '启用'}。`, 'success');
+    } catch (error) {
+      setStatus(error.message || '更新监控状态失败', 'error');
+    }
+  }
+
+  async function deleteMonitor(config) {
+    if (!confirm(`确定删除“${config.name || '这条监控'}”吗？删除后不会影响已经下载的文件。`)) return;
+    try {
+      const response = await sendRuntime({ type: 'DELETE_MONITOR', monitorId: config.id });
+      if (!response?.ok) throw new Error(response?.error || '删除监控失败');
+      monitorConfigs = Array.isArray(response.monitors) ? response.monitors : [];
+      if (editingMonitorId === config.id) clearMonitorForm();
+      renderMonitorList();
+      setStatus(`监控“${config.name || ''}”已删除。`, 'success');
+    } catch (error) {
+      setStatus(error.message || '删除监控失败', 'error');
+    }
+  }
+
   function renderStoreStatus(pageType, status = {}) {
     currentStoreStatus = status || { exists: false, profile: null };
     const isAccount = pageType === 'account';
@@ -304,6 +586,7 @@
     $('modeApi').setAttribute('aria-pressed', selectedMode === 'api');
     $('modeTitle').textContent = modeLabel();
     $('modeHint').textContent = modeHint();
+    if ($('monitorModeNote')) $('monitorModeNote').textContent = `保存时使用：${modeLabel()}`;
     if (persist) {
       settings = { ...settings, mode: selectedMode };
       void sendRuntime({ type: 'SAVE_SETTINGS', settings }).catch(() => {});
@@ -1137,7 +1420,11 @@
     $('pageContextJump').addEventListener('click', () => showScreen(currentPageType === 'account' ? 'store' : 'detail'));
     $('backButton').addEventListener('click', () => goBack());
     document.querySelectorAll('[data-open-screen]').forEach(button => {
-      button.addEventListener('click', () => showScreen(button.dataset.openScreen));
+      button.addEventListener('click', () => {
+        if (button.dataset.monitorKind) setMonitorKind(button.dataset.monitorKind);
+        showScreen(button.dataset.openScreen);
+        if (button.dataset.openScreen === 'monitor') void refreshMonitors().catch(error => setStatus(error.message, 'error'));
+      });
     });
     document.querySelector('[data-action="diagnostic"]')?.addEventListener('click', () => {
       showScreen('detail');
@@ -1167,6 +1454,15 @@
     document.querySelectorAll('[data-open-data-tab]').forEach(button => {
       button.addEventListener('click', () => setDataTab(button.dataset.openDataTab));
     });
+    $('monitorProductEntry').addEventListener('click', () => setMonitorKind('product'));
+    $('monitorStoreEntry').addEventListener('click', () => setMonitorKind('store'));
+    $('monitorSaveButton').addEventListener('click', () => saveMonitor());
+    $('monitorCancelEditButton').addEventListener('click', () => clearMonitorForm());
+    $('monitorRefreshButton').addEventListener('click', () => refreshMonitors().catch(error => setStatus(error.message, 'error')));
+    $('monitorLinksInput').addEventListener('input', () => {
+      const count = parseMonitorLinks($('monitorLinksInput').value, monitorKind).length;
+      $('monitorLinkCount').textContent = `${count} 个有效链接`;
+    });
     $('saveSettingsButton').addEventListener('click', () => saveSettings().catch(error => setStatus(error.message, 'error')));
     $('linkInput').addEventListener('input', () => {
       const links = parseProductLinks($('linkInput').value);
@@ -1189,16 +1485,20 @@
   document.addEventListener('DOMContentLoaded', async () => {
     bindEvents();
     updateScreenChrome('home');
+    renderMonitorKind();
     try {
       await loadSettings();
-      await Promise.all([refreshCurrentPage(), refreshCount(), refreshHistory(), refreshJob()]);
+      await Promise.all([refreshCurrentPage(), refreshCount(), refreshHistory(), refreshJob(), refreshMonitors()]);
     } catch (error) {
       setStatus(error.message || '插件初始化失败，请刷新侧边栏重试。', 'error');
     }
 
+    let monitorPollTick = 0;
     const pollTimer = setInterval(() => {
       void refreshJob().catch(() => {});
       void refreshCount().catch(() => {});
+      monitorPollTick += 1;
+      if (currentScreen === 'monitor' && monitorPollTick % 5 === 0) void refreshMonitors().catch(() => {});
     }, 1000);
     window.addEventListener('unload', () => clearInterval(pollTimer), { once: true });
   });

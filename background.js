@@ -455,11 +455,11 @@ function normalizeMonitorConfig(input = {}, previous = {}) {
     enabled: input.enabled !== undefined ? input.enabled !== false : previous.enabled !== false,
     createdAt: cleanText(previous.createdAt || input.createdAt || now, 80),
     updatedAt: now,
-    nextRunAt: Number(input.nextRunAt || previous.nextRunAt || 0),
-    lastRunAt: cleanText(input.lastRunAt || previous.lastRunAt || '', 80),
-    lastRunStatus: cleanText(input.lastRunStatus || previous.lastRunStatus || '', 40),
-    lastRunMessage: cleanText(input.lastRunMessage || previous.lastRunMessage || '', 1000),
-    lastRunFile: cleanText(input.lastRunFile || previous.lastRunFile || '', 300),
+    nextRunAt: Number(input.nextRunAt !== undefined ? input.nextRunAt : (previous.nextRunAt || 0)) || 0,
+    lastRunAt: cleanText(input.lastRunAt !== undefined ? input.lastRunAt : (previous.lastRunAt || ''), 80),
+    lastRunStatus: cleanText(input.lastRunStatus !== undefined ? input.lastRunStatus : (previous.lastRunStatus || ''), 40),
+    lastRunMessage: cleanText(input.lastRunMessage !== undefined ? input.lastRunMessage : (previous.lastRunMessage || ''), 1000),
+    lastRunFile: cleanText(input.lastRunFile !== undefined ? input.lastRunFile : (previous.lastRunFile || ''), 300),
     lastRunCount: Math.max(0, Number(input.lastRunCount ?? previous.lastRunCount ?? 0) || 0),
     lastRunFailureCount: Math.max(0, Number(input.lastRunFailureCount ?? previous.lastRunFailureCount ?? 0) || 0)
   };
@@ -2055,23 +2055,31 @@ async function collectMonitorProduct(tabId, link, mode, collectSellerInfo) {
   if (collectSellerInfo !== false) {
     let sellerUrl = validSellerUrl(item.sellerUrl || '');
     if (!sellerUrl) {
-      const entry = await discoverSellerEntry(tabId);
-      sellerUrl = validSellerUrl(entry?.sellerUrl || '');
-      if (sellerUrl) item = sanitizeItem({
-        ...item,
-        sellerUrl,
-        sellerName: item.sellerName || entry.sellerName || ''
-      }, link);
+      try {
+        const entry = await discoverSellerEntry(tabId);
+        sellerUrl = validSellerUrl(entry?.sellerUrl || '');
+        if (sellerUrl) item = sanitizeItem({
+          ...item,
+          sellerUrl,
+          sellerName: item.sellerName || entry.sellerName || ''
+        }, link);
+      } catch (_) {
+        sellerUrl = '';
+      }
     }
 
     if (sellerUrl) {
-      const profile = await fetchSellerProfileInTab(tabId, sellerUrl, link);
-      const productProfile = sanitizeStoreProfile(
-        { ...profile, reviews: [] },
-        sellerUrl,
-        { forProduct: true }
-      );
-      item = applyProfileToItem(item, productProfile || profile);
+      try {
+        const profile = await fetchSellerProfileInTab(tabId, sellerUrl, link);
+        const productProfile = sanitizeStoreProfile(
+          { ...profile, reviews: [] },
+          sellerUrl,
+          { forProduct: true }
+        );
+        item = applyProfileToItem(item, productProfile || profile);
+      } catch (_) {
+        // 商品详情本身已经成功时，卖家基础资料补采失败不能丢弃商品行；下一次监控会重试补齐。
+      }
     }
   }
 
@@ -2259,15 +2267,24 @@ async function startMonitorRun(monitorId, force = false) {
 
 async function syncMonitorAlarms() {
   const monitors = await readMonitors();
+  const runs = await readMonitorRuns();
   let changed = false;
   for (const config of monitors) {
-    if (!config.enabled) {
-      await chrome.alarms.clear(monitorAlarmName(config.id)).catch(() => {});
-      continue;
-    }
     let alarm = null;
     if (typeof chrome.alarms.get === 'function') {
       alarm = await chrome.alarms.get(monitorAlarmName(config.id)).catch(() => null);
+    }
+
+    // Service Worker 休眠或扩展重载后，优先恢复未完成的逐条任务；
+    // 不能因为同步每日计划而把中断的任务推迟到下一天。
+    if (runs[config.id]) {
+      if (!alarm) await scheduleMonitorStep(config.id, 1200);
+      continue;
+    }
+
+    if (!config.enabled) {
+      if (alarm) await chrome.alarms.clear(monitorAlarmName(config.id)).catch(() => {});
+      continue;
     }
     if (!alarm) {
       const nextRunAt = nextMonitorRunAt(config);
@@ -2580,9 +2597,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           : [saved, ...monitors];
         await writeMonitors(nextMonitors);
         await chrome.alarms.clear(monitorAlarmName(saved.id)).catch(() => {});
-        if (saved.enabled) await scheduleMonitorAlarm(saved, nextRunAt);
         const active = await readMonitorRun(saved.id);
-        if (active && !saved.enabled) await finishMonitorRun(active, { status: 'stopped', skipExport: true, message: '配置已暂停。' });
+        if (active) {
+          if (!saved.enabled) {
+            await finishMonitorRun(active, { status: 'stopped', skipExport: true, message: '配置已暂停。' });
+          } else {
+            // 编辑中的这一次继续使用已启动时的链接快照；新配置从下一轮开始生效。
+            await scheduleMonitorStep(saved.id, 500);
+          }
+        } else if (saved.enabled) {
+          await scheduleMonitorAlarm(saved, nextRunAt);
+        }
         return { ok: true, monitor: saved, monitors: await monitorView() };
       }
 
@@ -2618,7 +2643,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'RUN_MONITOR_NOW': {
         const monitorId = cleanText(message.monitorId, 100);
         const run = await startMonitorRun(monitorId, true);
-        await processMonitorRunStep(monitorId);
+        void processMonitorRunStep(monitorId);
         return { ok: true, run, monitors: await monitorView() };
       }
 

@@ -110,6 +110,20 @@
               </button>
             </section>
 
+            <section class="menu-card monitor-menu-card">
+              <h2>定时监控</h2>
+              <button class="menu-row" type="button" data-open-screen="monitor" data-monitor-kind="product">
+                <span class="row-icon blue">◌</span>
+                <span class="row-copy"><strong>商品监控</strong><small>每天按计划获取商品表并自动下载</small></span>
+                <span class="row-chevron">›</span>
+              </button>
+              <button class="menu-row" type="button" data-open-screen="monitor" data-monitor-kind="store">
+                <span class="row-icon orange">◎</span>
+                <span class="row-copy"><strong>店铺监控</strong><small>每天按计划获取店铺资料和评价表</small></span>
+                <span class="row-chevron">›</span>
+              </button>
+            </section>
+
             <section class="menu-card compact-card">
               <h2>工具与边界</h2>
               <button class="menu-row" type="button" data-action="diagnostic">
@@ -259,6 +273,57 @@ https://www.goofish.com/item?id=…"></textarea>
           <section class="action-card data-actions-card data-clear-card">
             <button id="clearButton" class="button danger-outline" type="button">清空当前数据</button>
             <p id="exportHint" class="helper">清空会同时清空本地商品表和店铺表，但不会删除采集历史。</p>
+          </section>
+        </section>
+
+        <section id="screen-monitor" class="screen" data-screen="monitor" aria-labelledby="screenTitle">
+          <section class="page-intro monitor-page-intro">
+            <span class="intro-label">MONITORING DESK</span>
+            <h2 id="monitorPageTitle">商品监控</h2>
+            <p id="monitorPageSubtitle">每天按设定时间打开商品详情页，采集完成后自动下载商品表。</p>
+          </section>
+
+          <div class="monitor-entry-switch" role="tablist" aria-label="选择监控类型">
+            <button id="monitorProductEntry" class="monitor-entry is-selected" type="button" role="tab" aria-selected="true">
+              <span class="monitor-entry-icon blue">◌</span>
+              <span><strong>商品监控</strong><small>商品详情页 → 商品表</small></span>
+            </button>
+            <button id="monitorStoreEntry" class="monitor-entry" type="button" role="tab" aria-selected="false">
+              <span class="monitor-entry-icon orange">◎</span>
+              <span><strong>店铺监控</strong><small>店铺页 → 店铺资料与评价</small></span>
+            </button>
+          </div>
+
+          <section class="form-card monitor-form-card">
+            <div class="monitor-form-heading">
+              <div>
+                <span class="intro-label">NEW MONITOR</span>
+                <h3 id="monitorFormTitle">新建商品监控</h3>
+              </div>
+              <span id="monitorModeNote" class="monitor-mode-note">保存时使用：页面详情模式</span>
+            </div>
+            <label class="form-label" for="monitorName">监控名称<input id="monitorName" type="text" maxlength="80" placeholder="例如：重点商品每日跟踪" /></label>
+            <label id="monitorLinksLabel" class="form-label" for="monitorLinksInput">商品详情链接 <span class="optional-label">一行一个</span></label>
+            <textarea id="monitorLinksInput" class="link-input monitor-links-input" rows="7" placeholder="https://www.goofish.com/item?id=..."></textarea>
+            <div class="input-footer"><span id="monitorLinkHint">只接受闲鱼商品详情链接</span><strong id="monitorLinkCount">0 个有效链接</strong></div>
+            <div class="field-grid large-grid monitor-field-grid">
+              <label class="form-label" for="monitorTime">每天开始时间<input id="monitorTime" type="time" value="09:00" /></label>
+              <label class="form-label" for="monitorFolder">自动下载子文件夹<input id="monitorFolder" type="text" placeholder="闲鱼研究监控/商品" /></label>
+            </div>
+            <p class="field-note">下载位置是 Chrome 默认下载目录下的子文件夹；自动监控不能填写电脑绝对路径，也不会弹出“另存为”对话框。</p>
+            <div class="monitor-form-actions">
+              <button id="monitorSaveButton" class="button primary large" type="button">保存并开始监控</button>
+              <button id="monitorCancelEditButton" class="button outline-action is-hidden" type="button">取消编辑</button>
+            </div>
+            <p id="monitorFormStatus" class="helper">保存后会立即建立每日计划；第一次运行将在下一个设定时间开始。</p>
+          </section>
+
+          <section class="monitor-list-card">
+            <div class="monitor-list-heading">
+              <div><span class="intro-label">SAVED MONITORS</span><h3>已保存的监控</h3></div>
+              <button id="monitorRefreshButton" class="text-button" type="button">刷新</button>
+            </div>
+            <div id="monitorList" class="monitor-list"><p class="empty-state">还没有保存的监控配置。</p></div>
           </section>
         </section>
 
