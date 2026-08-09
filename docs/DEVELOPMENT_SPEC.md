@@ -1,6 +1,6 @@
 # 闲鱼公开商品研究采集器｜开发文档
 
-版本：0.5.13
+版本：0.5.14
 日期：2026-08-09
 实现基线：Chrome Manifest V3
 
@@ -159,6 +159,7 @@ idle
 - `isInternalCategory()` 会过滤带标签的类目 ID 和长纯数字类目 ID；可见“服务类型/服务类目/服务类别”在 DOM 合并时优先级更高。
 - 任务分别维护 `failures`（详情页）、`sellerFailures`（账号页）和 `qualityWarnings`（字段缺失）。任务结束时由 `terminalStatus()` 归并成 `completed`、`partial` 或 `failed`；有成功记录但存在未完成项时必须是 `partial`。
 - `jobFailureRecords()` 为侧边栏和历史任务提供统一结构，包含阶段、商品 URL/ID、卖家 URL、错误原因和缺失字段；侧边栏支持复制商品 URL 重新批量采集。
+- `qualityWarnings` 的语义是“当前采集没有读到预设字段”，不是“平台确认没有该字段”。除非页面出现明确的“暂无/未公开”状态，否则不能把缺失归因到平台不存在；侧边栏需把这一点直接告诉用户。
 
 ## 5. 消息协议
 
