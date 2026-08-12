@@ -875,6 +875,57 @@
     return values.sort((a, b) => b.length - a.length)[0] || '';
   }
 
+  function detailDescriptionScopes(root = document) {
+    const selector = '[class^="desc--"], [class*=" desc--"], [class*="description--"], [class*="Description--"], [data-testid*="description"], [data-testid*="desc"], [class*="detail-content"], [class*="DetailContent"]';
+    const nodes = [...(root?.querySelectorAll?.(selector) || [])];
+    return unique(nodes.flatMap(node => {
+      const scopes = [node];
+      let parent = node.parentElement;
+      for (let level = 0; level < 2 && parent; level++, parent = parent.parentElement) scopes.push(parent);
+      return scopes;
+    }));
+  }
+
+  function expandableLabel(node) {
+    return oneLine(
+      node?.getAttribute?.('aria-label')
+        || node?.getAttribute?.('title')
+        || node?.textContent
+        || '',
+      80
+    ).replace(/\s+/g, '');
+  }
+
+  async function expandDetailDescription(root = document) {
+    let clicked = 0;
+    const scopes = detailDescriptionScopes(root);
+    for (const scope of scopes) {
+      const controls = [...(scope?.querySelectorAll?.('button, [role="button"], a, span, div') || [])]
+        .filter(node => {
+          const label = expandableLabel(node);
+          if (!label || !/^(?:展开|展开全文|查看更多|更多)(?:内容|详情|文案)?$/.test(label)) return false;
+          if (node.getAttribute?.('aria-expanded') === 'true') return false;
+          return isVisibleControl(node);
+        })
+        .sort((first, second) => expandableLabel(first).length - expandableLabel(second).length);
+      const control = controls[0];
+      if (!control) continue;
+      try {
+        control.click();
+        clicked += 1;
+      } catch (_) {
+        try {
+          control.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+          clicked += 1;
+        } catch (_) {
+          // 页面组件可能在本轮渲染中被卸载，下一轮会再次查找。
+        }
+      }
+    }
+    if (clicked) await delay(260);
+    return { clicked, expanded: clicked > 0 };
+  }
+
   function isAccountPage() {
     return /^\/personal(?:[/?#]|$)/i.test(location.pathname);
   }
@@ -1936,6 +1987,9 @@
     for (let attempt = 0; attempt < Math.max(3, Number(maxAttempts) || 12); attempt++) {
       overlay = await dismissPublicLoginOverlay();
       actual = pageType();
+      if (expected === 'detail' && actual === 'detail') {
+        await expandDetailDescription(document);
+      }
       const ready = actual === expected && (
         expected === 'detail'
           ? detailPageLooksReady()
@@ -2084,6 +2138,76 @@
 
     window.scrollTo({ top: originalScroll, behavior: 'auto' });
     return accountReviewsFromPage(document.body);
+  }
+
+  function storeProductLinkItems(root = document) {
+    const anchors = [...(root?.querySelectorAll?.('a[href]') || [])]
+      .filter(anchor => /(?:\/item(?:[/?#])|[?&](?:itemId|item_id|id|auctionId)=)/i.test(anchor.href || ''))
+      .map(anchor => ({ anchor, node: findCardRootForAnchor(anchor) }));
+    const ordered = sortCandidatesByVisualOrder(anchors);
+    const seen = new Set();
+    const items = [];
+    for (const candidate of ordered) {
+      const itemUrl = toAbsoluteUrl(candidate.anchor?.href || '');
+      const itemId = extractItemIdFromUrl(itemUrl);
+      const key = itemId ? `id:${itemId}` : `url:${itemUrl}`;
+      if (!itemUrl || !key || seen.has(key)) continue;
+      seen.add(key);
+      const root = candidate.node || candidate.anchor;
+      items.push({
+        itemId,
+        title: firstMeaningfulTitle(root, candidate.anchor),
+        itemUrl,
+        sellerName: sellerNameFromRoot(root),
+        sourcePage: location.href
+      });
+    }
+    return items;
+  }
+
+  async function collectStoreProductLinks() {
+    const prepared = await preparePublicPage('account', 14);
+    if (!prepared.ready) return { ...prepared, items: [] };
+    const originalX = window.scrollX || 0;
+    const originalY = window.scrollY || 0;
+    const ordered = new Map();
+    let stableRounds = 0;
+    let previousCount = 0;
+    try {
+      window.scrollTo({ top: 0, left: originalX, behavior: 'auto' });
+      await delay(320);
+      for (let round = 0; round < 60; round++) {
+        await dismissPublicLoginOverlay();
+        for (const item of storeProductLinkItems(document)) {
+          const key = item.itemId ? `id:${item.itemId}` : `url:${item.itemUrl}`;
+          if (!ordered.has(key)) ordered.set(key, item);
+        }
+        const scrollRoot = document.scrollingElement || document.documentElement;
+        const currentTop = window.scrollY || scrollRoot.scrollTop || 0;
+        const maxTop = Math.max(0, scrollRoot.scrollHeight - window.innerHeight);
+        const atBottom = currentTop >= maxTop - 120;
+        if (atBottom && ordered.size === previousCount) stableRounds += 1;
+        else stableRounds = 0;
+        previousCount = ordered.size;
+        if (atBottom && stableRounds >= 3) break;
+        window.scrollTo({
+          top: Math.min(maxTop, currentTop + Math.max(680, window.innerHeight * 0.84)),
+          left: originalX,
+          behavior: 'auto'
+        });
+        await delay(round < 4 ? 520 : 700);
+      }
+    } finally {
+      window.scrollTo({ top: originalY, left: originalX, behavior: 'auto' });
+    }
+    return {
+      ok: true,
+      ready: ordered.size > 0,
+      pageType: 'account',
+      items: [...ordered.values()].slice(0, 2000),
+      productCount: ordered.size,
+      overlayDismissed: prepared.overlayDismissed
+    };
   }
 
   async function collectStoreProfile(persistToDataCenter = true) {
@@ -2529,6 +2653,13 @@
       collectStoreProfile(message.persistToDataCenter !== false)
         .then(sendResponse)
         .catch(error => sendResponse({ ok: false, error: error?.message || String(error) }));
+      return true;
+    }
+
+    if (message?.type === 'GET_STORE_PRODUCT_LINKS') {
+      collectStoreProductLinks()
+        .then(sendResponse)
+        .catch(error => sendResponse({ ok: false, pageType: pageType(), items: [], error: error?.message || String(error) }));
       return true;
     }
     return false;

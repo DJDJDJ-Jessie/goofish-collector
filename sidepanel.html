@@ -180,12 +180,13 @@
             <div class="context-state"><span>当前状态</span><strong id="storeCurrentState">待检查</strong></div>
           </section>
 
-          <section class="action-card">
+            <section class="action-card">
             <button id="storeCollectButton" class="button primary large" type="button">采集当前店铺页</button>
+            <button id="storeProductsButton" class="button primary large" type="button">采集店铺全部商品详情</button>
             <button id="storeCommitButton" class="button teal-action large" type="button" disabled>加到数据中心店铺表</button>
             <button id="storeExportButton" class="button teal-action large" type="button" disabled>立即下载店铺 Excel</button>
             <button id="storeDataButton" class="button outline-action" type="button">查看数据中心店铺表</button>
-            <p id="storeCollectHint" class="helper">采集会在当前标签页内滚动评价区域；结果会先暂存，下载文件包含“店铺资料”和“店铺评价综合”两张表。</p>
+            <p id="storeCollectHint" class="helper">“采集当前店铺页”读取店铺资料和全部公开评价；“采集店铺全部商品详情”会建立独立任务，逐个进入店铺商品详情页。</p>
           </section>
         </section>
 
@@ -319,6 +320,37 @@ https://www.goofish.com/item?id=…"></textarea>
             </div>
           </section>
 
+          <section class="field-config-overview">
+            <div class="field-config-overview-head">
+              <div>
+                <span class="intro-label">EXPORT WORKSPACE</span>
+                <h3>导出字段工作台</h3>
+                <p>每种表格单独配置字段，选择后还可以调整 Excel 列顺序；所有采集入口都会使用这里的设置。</p>
+              </div>
+              <span class="field-config-orbit" aria-hidden="true">↕</span>
+            </div>
+            <div class="field-config-summary-grid">
+              <button class="field-config-summary" type="button" data-open-fields="product">
+                <span class="field-config-summary-kicker">PRODUCT TABLE</span>
+                <strong>商品表</strong>
+                <small id="productFieldSummary">已选字段读取中…</small>
+                <span class="field-config-summary-action">配置字段 →</span>
+              </button>
+              <button class="field-config-summary" type="button" data-open-fields="storeProfile">
+                <span class="field-config-summary-kicker">STORE PROFILE</span>
+                <strong>店铺资料表</strong>
+                <small id="storeProfileFieldSummary">已选字段读取中…</small>
+                <span class="field-config-summary-action">配置字段 →</span>
+              </button>
+              <button class="field-config-summary" type="button" data-open-fields="storeReview">
+                <span class="field-config-summary-kicker">STORE REVIEWS</span>
+                <strong>店铺评价表</strong>
+                <small id="storeReviewFieldSummary">已选字段读取中…</small>
+                <span class="field-config-summary-action">配置字段 →</span>
+              </button>
+            </div>
+          </section>
+
           <button id="openDownloadSettings" class="text-button" type="button">打开 Chrome 下载目录设置 ↗</button>
           <button id="saveSettingsButton" class="button primary large" type="button">保存设置</button>
         </section>
@@ -363,6 +395,42 @@ https://www.goofish.com/item?id=…"></textarea>
               <button id="taskDataButton" class="button teal-action" type="button">打开数据中心</button>
             </div>
           </section>
+        </section>
+      </div>
+
+      <div id="fieldConfigModal" class="modal-backdrop is-hidden" role="dialog" aria-modal="true" aria-labelledby="fieldConfigTitle">
+        <section class="field-config-modal">
+          <header class="field-config-modal-head">
+            <div>
+              <span class="intro-label">FIELD CONFIGURATION</span>
+              <h2 id="fieldConfigTitle">字段配置工作台</h2>
+              <p>可搜索、分组勾选、调整导出顺序；只影响导出文件，不改变本地原始数据。</p>
+            </div>
+            <button id="closeFieldConfigButton" class="modal-close" type="button" aria-label="关闭字段配置">×</button>
+          </header>
+          <div class="field-config-tabs" role="tablist" aria-label="选择要配置的表格">
+            <button class="field-config-tab is-selected" type="button" role="tab" data-field-tab="product">商品表 <span id="productFieldTabCount">0</span></button>
+            <button class="field-config-tab" type="button" role="tab" data-field-tab="storeProfile">店铺资料 <span id="storeProfileFieldTabCount">0</span></button>
+            <button class="field-config-tab" type="button" role="tab" data-field-tab="storeReview">店铺评价 <span id="storeReviewFieldTabCount">0</span></button>
+          </div>
+          <div class="field-config-toolbar">
+            <label class="field-search"><span aria-hidden="true">⌕</span><input id="fieldConfigSearch" type="search" placeholder="搜索字段名称或分组" /></label>
+            <button id="resetFieldConfigButton" class="button small outline-action" type="button">恢复默认</button>
+          </div>
+          <div class="field-config-body">
+            <section class="field-config-pane">
+              <div class="field-config-pane-head"><strong>可选字段</strong><span id="availableFieldCount">0</span></div>
+              <div id="availableFieldList" class="field-config-list"></div>
+            </section>
+            <section class="field-config-pane selected-pane">
+              <div class="field-config-pane-head"><strong>已选字段 · 拖动/调整顺序</strong><span id="selectedFieldCount">0</span></div>
+              <div id="selectedFieldList" class="field-config-list"></div>
+            </section>
+          </div>
+          <footer class="field-config-modal-foot">
+            <div><strong id="fieldConfigFooterCount">已选 0 个字段</strong><small>保存后，商品/店铺的所有下载都会使用新顺序</small></div>
+            <div class="field-config-foot-actions"><button id="cancelFieldConfigButton" class="button outline-action" type="button">取消</button><button id="saveFieldConfigButton" class="button primary" type="button">保存字段设置</button></div>
+          </footer>
         </section>
       </div>
 

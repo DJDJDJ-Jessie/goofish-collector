@@ -359,6 +359,89 @@
     return `${XML_HEADER}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${DRAWING_REL_TYPE}" Target="../drawings/${xmlEscape(drawingFileName)}"/></Relationships>`;
   }
 
+  function defaultFieldDefinitions() {
+    return {
+      product: [
+        ['itemId', '商品ID'], ['itemUrl', '商品链接'], ['mainImageName', '主图文件名'], ['images', '商品图片'],
+        ['title', '商品标题'], ['description', '商品文案'], ['viewCount', '浏览数'], ['wantCount', '想要数'], ['price', '价格'], ['category', '类目'],
+        ['sellerName', '店铺名称'], ['sellerUrl', '卖家账号页'], ['sellerLocation', '卖家地区'], ['sellerFollowers', '粉丝数'],
+        ['sellerFollowing', '关注数'], ['sellerProductCount', '卖家商品数'], ['sellerIntro', '店铺简介'], ['storeDuration', '开店时长'],
+        ['itemGoodRate', '商品好评率'], ['sellerReviewCount', '店铺评价数'], ['imageStatus', '图片状态'],
+        ['reviewSummary', '商品评价摘要'], ['sellerReviewSummary', '店铺评价摘要'], ['reviewSamples', '评价示例'],
+        ['publishedAt', '发布时间'], ['sourcePage', '来源页面'], ['dataSource', '数据来源'], ['collectedAt', '采集时间']
+      ],
+      storeProfile: [
+        ['sellerName', '店铺名称'], ['sellerUrl', '卖家账号页'], ['sellerLocation', '卖家地区'], ['sellerFollowers', '粉丝数'],
+        ['sellerFollowing', '关注数'], ['sellerProductCount', '卖家商品数'], ['sellerIntro', '店铺简介'], ['sellerReviewCount', '店铺评价数'],
+        ['collectedAt', '采集时间'], ['sourcePage', '来源页面'], ['reviewCountLoaded', '已采集评价数']
+      ],
+      storeReview: [
+        ['sellerName', '店铺名称'], ['sellerUrl', '卖家账号页'], ['reviewIndex', '评价序号'], ['reviewer', '评价人'], ['role', '身份'],
+        ['feedback', '评价内容'], ['timeIp', '评价时间/地区'], ['reviewImageCount', '评价图片数'], ['reviewImageNames', '评价图片文件名'],
+        ['reviewImageStatus', '评价图片状态'], ['reviewImages', '评价图片'], ['reviewImageFailureUrl', '评价图片失败地址'],
+        ['reviewCollectedAt', '评价采集时间']
+      ]
+    };
+  }
+
+  function selectedFieldIds(type, options) {
+    const fallback = defaultFieldDefinitions()[type] || [];
+    const defaultIds = {
+      product: ['itemId', 'itemUrl', 'mainImageName', 'images', 'description', 'viewCount', 'wantCount', 'price', 'category', 'sellerName', 'sellerUrl', 'sellerLocation', 'sellerFollowers', 'sellerFollowing', 'sellerProductCount', 'sellerIntro', 'storeDuration', 'itemGoodRate', 'sellerReviewCount', 'collectedAt'],
+      storeProfile: ['sellerName', 'sellerUrl', 'sellerLocation', 'sellerFollowers', 'sellerFollowing', 'sellerProductCount', 'sellerIntro', 'sellerReviewCount', 'collectedAt'],
+      storeReview: fallback.map(([id]) => id)
+    }[type] || fallback.map(([id]) => id);
+    const requested = options?.fieldConfig?.[type];
+    const valid = new Set(fallback.map(([id]) => id));
+    const ids = Array.isArray(requested) ? requested.filter(id => valid.has(id)) : [];
+    return ids.length ? [...new Set(ids)] : defaultIds.filter(id => valid.has(id));
+  }
+
+  function fieldLabel(type, id) {
+    const definitions = defaultFieldDefinitions()[type] || [];
+    return definitions.find(([fieldId]) => fieldId === id)?.[1] || id;
+  }
+
+  function imageAssetsByItem(productAssets, item) {
+    return productAssets
+      .filter(asset => (asset.itemKey || itemKey(asset)) === itemKey(item))
+      .sort((first, second) => Number(first.imageIndex || 0) - Number(second.imageIndex || 0));
+  }
+
+  function imageStatusText(item, assets) {
+    if (!item.images.length) return '';
+    const expected = item.images.length;
+    const embedded = assets.filter(asset => Boolean(asset.bytes?.length)).length;
+    const failed = assets.filter(asset => !asset.bytes?.length).length + Math.max(0, expected - assets.length);
+    if (embedded >= expected) return '成功';
+    if (embedded > 0) return `部分成功：${embedded}/${expected}`;
+    return `下载失败：${assets.find(asset => asset.error)?.error || '未获取到图片二进制'}`;
+  }
+
+  function productFieldValue(item, fieldId, assets) {
+    const firstSuccess = assets.find(asset => Boolean(asset.bytes?.length));
+    const firstAsset = assets[0];
+    const reviewCount = item.sellerReviewCount || (item.sellerReviewSummary.match(/\d+/)?.[0] || '');
+    if (fieldId === 'mainImageName') return firstSuccess?.fileName || firstAsset?.fileName || (item.images.length ? suggestedProductFileName(item) : '');
+    if (fieldId === 'imageStatus') return imageStatusText(item, assets);
+    if (fieldId === 'reviewCount') return reviewCount;
+    if (fieldId === 'reviewSamples') return item.reviewSamples;
+    return item[fieldId] ?? '';
+  }
+
+  function storeProfileFieldValue(profile, fieldId) {
+    if (fieldId === 'reviewCountLoaded') return profile.reviews.length;
+    return profile[fieldId] ?? '';
+  }
+
+  function reviewImageStatusText(review, assets) {
+    if (!review.images.length) return '';
+    const embedded = assets.filter(asset => Boolean(asset.bytes?.length)).length;
+    if (embedded >= review.images.length) return '成功';
+    if (embedded > 0) return `部分成功：${embedded}/${review.images.length}`;
+    return `下载失败：${assets.find(asset => asset.error)?.error || '未获取到图片二进制'}`;
+  }
+
   function workbookFiles(items, imageAssets, storeProfiles, options = {}) {
     const storeOnly = options.kind === 'store';
     const safeItems = Array.isArray(items) ? items : [];
@@ -366,65 +449,57 @@
     const media = assignMediaAssets(imageAssets);
     const productAssets = media.assets.filter(asset => asset.kind !== 'review');
     const reviewAssets = media.assets.filter(asset => asset.kind === 'review');
-    const byItem = new Map();
-    for (const asset of productAssets) {
-      const key = asset.itemKey || itemKey(asset);
-      const previous = byItem.get(key);
-      // 主表应优先展示该商品第一张成功下载的图片；如果全部失败，
-      // 才保留第一条失败记录，让图片索引表继续显示失败原因。
-      if (!previous || (!previous.bytes?.length && asset.bytes?.length)) byItem.set(key, asset);
-    }
+    const productFieldIds = selectedFieldIds('product', options);
+    const storeProfileFieldIds = selectedFieldIds('storeProfile', options);
+    const storeReviewFieldIds = selectedFieldIds('storeReview', options);
+    const productImageEnabled = productFieldIds.includes('images');
+    const reviewImageEnabled = storeReviewFieldIds.includes('reviewImages');
 
-    const mainHeaders = [
-      '商品ID', '商品链接', '主图文件名', '商品图片', '商品文案', '浏览数', '想要数', '价格', '类目', '店铺名称',
-      '卖家账号页', '卖家地区', '粉丝数', '关注数', '卖家商品数', '店铺简介', '开店时长', '商品好评率',
-      '店铺评价数', '采集时间'
-    ];
+    const productAssetMap = new Map();
+    let productImageSlots = productImageEnabled ? 1 : 0;
+    for (const raw of safeItems) {
+      const item = normalizeItem(raw);
+      const assets = imageAssetsByItem(productAssets, item);
+      productAssetMap.set(itemKey(item), assets);
+      productImageSlots = Math.max(productImageSlots, item.images.length, ...assets.map(asset => Number(asset.imageIndex) || 0));
+    }
+    productImageSlots = Math.min(30, productImageSlots);
+
+    const productHeaders = [];
+    for (const fieldId of productFieldIds) {
+      if (fieldId === 'images') {
+        for (let index = 1; index <= productImageSlots; index += 1) {
+          productHeaders.push(index === 1 ? '商品图片' : `商品图片${index}`);
+        }
+      } else {
+        productHeaders.push(fieldLabel('product', fieldId));
+      }
+    }
     const mainRows = [];
     const mainPlacements = [];
     const mainRowHeights = {};
-
     safeItems.forEach((raw, itemIndex) => {
       const item = normalizeItem(raw);
-      const asset = byItem.get(itemKey(item));
-      const hasImage = Boolean(asset?.bytes?.length);
-      const statusFileName = asset?.fileName || (item.images.length ? suggestedProductFileName(item) : '');
-      const reviewCount = item.sellerReviewCount || (item.sellerReviewSummary.match(/\d+/)?.[0] || '');
-      mainRows.push([
-        item.itemId, item.itemUrl, statusFileName,
-        '', item.description, item.viewCount, item.wantCount, item.price, item.category, item.sellerName,
-        item.sellerUrl, item.sellerLocation, item.sellerFollowers, item.sellerFollowing, item.sellerProductCount,
-        item.sellerIntro, item.storeDuration, item.itemGoodRate, reviewCount, item.collectedAt
-      ]);
-
-      if (hasImage) {
-        const row = itemIndex + 1;
-        mainPlacements.push({ asset, row, col: 3 });
-        mainRowHeights[itemIndex + 2] = 96;
+      const assets = productAssetMap.get(itemKey(item)) || [];
+      const row = [];
+      let column = 0;
+      for (const fieldId of productFieldIds) {
+        if (fieldId === 'images') {
+          for (let imageIndex = 1; imageIndex <= productImageSlots; imageIndex += 1) {
+            const asset = assets.find(candidate => Number(candidate.imageIndex) === imageIndex);
+            row.push('');
+            if (asset?.bytes?.length) {
+              mainPlacements.push({ asset, row: itemIndex + 1, col: column });
+              mainRowHeights[itemIndex + 2] = Math.max(mainRowHeights[itemIndex + 2] || 0, 96);
+            }
+            column += 1;
+          }
+        } else {
+          row.push(productFieldValue(item, fieldId, assets));
+          column += 1;
+        }
       }
-    });
-
-    const imageHeaders = [
-      '商品ID', '商品标题（内部识别）', '图片序号', '图片', '图片文件名', '图片状态',
-      '商品链接', '采集时间', '失败时原始地址'
-    ];
-    const imageRows = [];
-    const imagePlacements = [];
-    const imageRowHeights = {};
-
-    productAssets.forEach((asset, index) => {
-      const embedded = Boolean(asset.bytes?.length);
-      const row = index + 1;
-      imageRows.push([
-        asset.itemId || '', asset.title || '', asset.imageIndex || index + 1,
-        '', asset.fileName || '',
-        embedded ? '成功' : `下载失败：${asset.error || '未知错误'}`,
-        asset.itemUrl || '', asset.collectedAt || '', embedded ? '' : (asset.url || '')
-      ]);
-      if (embedded) {
-        imagePlacements.push({ asset, row, col: 3 });
-        imageRowHeights[index + 2] = 96;
-      }
+      mainRows.push(row);
     });
 
     const reviewAssetMap = new Map();
@@ -434,75 +509,84 @@
       reviewAssetMap.get(key).push(asset);
     }
 
-    // 店铺导出按用户实际对照方式拆成两张数据表：
-    // 1) “店铺资料”一店一行；2) “店铺评价综合”一条评价一行，评价图片与评价保持同一行。
-    // 内部仍按 profile/reviews/assets 分开保存，避免影响去重和增量更新。
-    const storeProfileHeaders = [
-      '店铺名称', '卖家账号页', '卖家地区', '粉丝数', '关注数', '卖家商品数', '店铺简介',
-      '店铺评价数', '采集时间', '来源页面', '已采集评价数'
-    ];
-    const storeProfileRows = safeProfiles.map(profile => [
-      profile.sellerName, profile.sellerUrl, profile.sellerLocation, profile.sellerFollowers,
-      profile.sellerFollowing, profile.sellerProductCount, profile.sellerIntro,
-      profile.sellerReviewCount, profile.collectedAt, profile.sourcePage,
-      profile.reviews.length
-    ]);
-    const storeReviewHeaders = [
-      '店铺名称', '卖家账号页', '评价序号', '评价人', '身份', '评价内容', '评价时间/地区', '评价图片数',
-      '评价图片文件名', '评价图片状态', '评价图片', '评价图片失败地址', '评价采集时间'
-    ];
+    let reviewImageSlots = reviewImageEnabled ? 1 : 0;
+    for (const profile of safeProfiles) {
+      for (const review of profile.reviews) {
+        const assets = reviewAssetMap.get(reviewKey(profile, review, review.reviewIndex - 1)) || [];
+        reviewImageSlots = Math.max(reviewImageSlots, review.images.length, ...assets.map(asset => Number(asset.imageIndex) || 0));
+      }
+    }
+    reviewImageSlots = Math.min(30, reviewImageSlots);
+
+    const storeProfileHeaders = storeProfileFieldIds.map(fieldId => fieldLabel('storeProfile', fieldId));
+    const storeProfileRows = safeProfiles.map(profile => storeProfileFieldIds.map(fieldId => storeProfileFieldValue(profile, fieldId)));
+    const storeReviewHeaders = [];
+    for (const fieldId of storeReviewFieldIds) {
+      if (fieldId === 'reviewImages') {
+        for (let index = 1; index <= reviewImageSlots; index += 1) {
+          storeReviewHeaders.push(index === 1 ? '评价图片' : `评价图片${index}`);
+        }
+      } else {
+        storeReviewHeaders.push(fieldLabel('storeReview', fieldId));
+      }
+    }
     const storeReviewRows = [];
     const storePlacements = [];
     const storeRowHeights = {};
-    const reviewImageColumn = 10; // “评价图片”列，0-based
 
     function appendStoreReviewRow(profile, review, reviewIndex = 0) {
       const assets = reviewAssetMap.get(reviewKey(profile, review, reviewIndex)) || [];
-      const embeddedAssets = assets.filter(asset => Boolean(asset.bytes?.length));
       const imageNames = assets.map(asset => asset.fileName || '').filter(Boolean);
-      const imageStatuses = assets.map(asset => asset.bytes?.length
-        ? '成功'
-        : `下载失败：${asset.error || '未知错误'}`);
+      const imageStatuses = assets.map(asset => asset.bytes?.length ? '成功' : `下载失败：${asset.error || '未知错误'}`);
       const failedUrls = assets.filter(asset => !asset.bytes?.length).map(asset => asset.url || '').filter(Boolean);
       const rowIndex = storeReviewRows.length;
-      storeReviewRows.push([
-        profile.sellerName, profile.sellerUrl,
-        review.reviewIndex || reviewIndex + 1, review.reviewer || '', review.role || '',
-        review.feedback || '', review.timeIp || '', review.images.length,
-        imageNames.join('\n'), imageStatuses.join('\n'), '', failedUrls.join('\n'), review.collectedAt || ''
-      ]);
-
-      if (embeddedAssets.length) {
-        // 一条评价的多张图片仍在同一行：按三列一组横向排列，超出后向下错位，避免图片互相覆盖。
-        const slotsPerRow = 3;
-        const imageRows = Math.ceil(embeddedAssets.length / slotsPerRow);
-        storeRowHeights[rowIndex + 2] = Math.max(96, imageRows * 86 + 10);
-        embeddedAssets.forEach((asset, assetIndex) => {
-          storePlacements.push({
-            asset,
-            row: rowIndex + 1,
-            col: reviewImageColumn,
-            colOffsetPx: (assetIndex % slotsPerRow) * 115,
-            rowOffsetPx: Math.floor(assetIndex / slotsPerRow) * 86,
-            maxWidth: 105,
-            maxHeight: 75
-          });
-        });
+      const row = [];
+      let column = 0;
+      for (const fieldId of storeReviewFieldIds) {
+        if (fieldId === 'reviewImages') {
+          for (let imageIndex = 1; imageIndex <= reviewImageSlots; imageIndex += 1) {
+            const asset = assets.find(candidate => Number(candidate.imageIndex) === imageIndex);
+            row.push('');
+            if (asset?.bytes?.length) {
+              storePlacements.push({
+                asset,
+                row: rowIndex + 1,
+                col: column,
+                colOffsetPx: ((imageIndex - 1) % 3) * 115,
+                rowOffsetPx: Math.floor((imageIndex - 1) / 3) * 86,
+                maxWidth: 105,
+                maxHeight: 75
+              });
+              storeRowHeights[rowIndex + 2] = Math.max(storeRowHeights[rowIndex + 2] || 0, Math.ceil(reviewImageSlots / 3) * 86 + 10);
+            }
+            column += 1;
+          }
+        } else {
+          const value = fieldId === 'sellerName' ? profile.sellerName
+            : fieldId === 'sellerUrl' ? profile.sellerUrl
+              : fieldId === 'reviewIndex' ? (review.reviewIndex || reviewIndex + 1)
+                : fieldId === 'reviewImageCount' ? review.images.length
+                  : fieldId === 'reviewImageNames' ? imageNames.join('\n')
+                    : fieldId === 'reviewImageStatus' ? reviewImageStatusText(review, assets)
+                      : fieldId === 'reviewImageFailureUrl' ? failedUrls.join('\n')
+                        : fieldId === 'reviewCollectedAt' ? review.collectedAt || profile.collectedAt
+                          : review[fieldId] ?? '';
+          row.push(value);
+          column += 1;
+        }
       }
+      storeReviewRows.push(row);
     }
-
-    for (const profile of safeProfiles) {
-      profile.reviews.forEach((review, index) => appendStoreReviewRow(profile, review, index));
-    }
+    for (const profile of safeProfiles) profile.reviews.forEach((review, index) => appendStoreReviewRow(profile, review, index));
 
     const notes = [
       ['项目', '说明'],
-      ['商品主表', '商品主表按需求固定为 20 列：商品 ID、链接、主图文件名、真实嵌入图片、商品文案、浏览数、想要数、价格、类目、店铺资料、商品好评率、店铺评价数和采集时间。'],
-      ['图片处理', '导出时会下载图片并将真实图片二进制嵌入 Excel；商品图片上限只限制商品图，已读取的评价图片会单独处理；店铺评价综合表中的评价图片与评价文本保持同一行，不把 URL 当作图片本身。'],
-      ['店铺表', '店铺资料单独放在“店铺资料”表，一店一行；店铺页无法可靠提供开店时长和商品好评率，因此店铺资料表不再生成这两个字段。店铺评价和评价图片放在“店铺评价综合”表，一条评价一行。'],
+      ['商品主表', '商品图片已经与商品字段放在同一张商品数据表中；同一商品的多张图片按“商品图片、商品图片2、商品图片3…”展开，不再生成图片索引表。'],
+      ['字段配置', `本次商品表字段：${productHeaders.join('、')}；店铺资料字段：${storeProfileHeaders.join('、')}；店铺评价字段：${storeReviewHeaders.join('、')}。字段选择和顺序在插件“设置”中统一保存。`],
+      ['图片处理', '导出时会下载图片并将真实图片二进制嵌入 Excel；商品图片和评价图片分别按设置处理，失败会在图片状态字段中说明原因，不会用 URL 冒充图片本身。'],
+      ['店铺表', '店铺资料和店铺评价仍是两张表：店铺资料一店一行，店铺评价综合一条评价一行，评价图片与评价文本保持同一行。店铺页无法可靠提供开店时长和商品好评率，因此不生成这两个字段。'],
       ['类目说明', '服务类商品优先使用详情属性区的“服务类型”（例如“金融”）作为类目；如果页面没有服务类型，再使用可见面包屑；只有 URL 内部 categoryId 而没有公开名称时留空，不编造类目名称。'],
       ['图片文件名', '商品图片格式为“商品标题_店铺名_商品ID_图序号.扩展名”；评价图片格式为“店铺名_评价序号_图序号.扩展名”。'],
-      ['下载失败', '如果图片 CDN 拒绝扩展程序访问，会在对应状态列标出错误；成功下载的图片不会退回成只保留链接。'],
       ['隐私边界', '插件只处理闲鱼页面公开可见或已经加载的数据，不读取聊天、Cookie，不生成签名，也不上传到外部服务器。']
     ];
 
@@ -516,7 +600,6 @@
       return entry;
     }
     const mainDrawing = storeOnly ? null : addDrawing(1, mainPlacements);
-    const imageDrawing = storeOnly ? null : addDrawing(2, imagePlacements);
     const storeDrawing = storeOnly ? addDrawing(2, storePlacements) : null;
     const imageDefaults = [...new Set(media.mediaFiles.map(file => file.extension))]
       .map(extension => `<Default Extension="${extension}" ContentType="${contentTypeForExtension(extension)}"/>`)
@@ -525,31 +608,28 @@
       .map(entry => `<Override PartName="/xl/drawings/${entry.fileName}" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>`)
       .join('');
 
-    const sheetNumbers = storeOnly ? [1, 2] : [1, 2, 3];
+    const productWidths = productHeaders.map(header => /图片/.test(header) ? 24 : /文案|简介|评价内容/.test(header) ? 64 : /链接|账号页|来源/.test(header) ? 44 : /ID/.test(header) ? 18 : 16);
+    const profileWidths = storeProfileHeaders.map(header => /简介/.test(header) ? 48 : /链接|来源/.test(header) ? 44 : /名称/.test(header) ? 22 : 16);
+    const reviewWidths = storeReviewHeaders.map(header => /图片/.test(header) ? 26 : /内容/.test(header) ? 80 : /链接/.test(header) ? 44 : 18);
+    const sheetNumbers = storeOnly ? [1, 2] : [1, 2];
     const workbookSheets = storeOnly
       ? '<sheet name="店铺资料" sheetId="1" r:id="rId1"/><sheet name="店铺评价综合" sheetId="2" r:id="rId2"/>'
-      : '<sheet name="商品数据" sheetId="1" r:id="rId1"/><sheet name="图片索引" sheetId="2" r:id="rId2"/><sheet name="说明" sheetId="3" r:id="rId3"/>';
+      : '<sheet name="商品数据" sheetId="1" r:id="rId1"/><sheet name="说明" sheetId="2" r:id="rId2"/>';
     const worksheetFiles = storeOnly
       ? [
         {
           name: 'xl/worksheets/sheet1.xml',
-          data: sheetXml(storeProfileHeaders, storeProfileRows, [22, 44, 14, 12, 12, 14, 48, 14, 22, 44, 14], {
-            selected: true,
-            textColumns: [0]
-          })
+          data: sheetXml(storeProfileHeaders, storeProfileRows, profileWidths, { selected: true, textColumns: [0] })
         },
         {
           name: 'xl/worksheets/sheet2.xml',
-          data: sheetXml(storeReviewHeaders, storeReviewRows, [22, 44, 10, 18, 14, 80, 32, 12, 56, 24, 28, 60, 22], {
-            rowHeights: storeRowHeights,
-            drawingRelId: storeDrawing ? 'rId1' : ''
-          })
+          data: sheetXml(storeReviewHeaders, storeReviewRows, reviewWidths, { rowHeights: storeRowHeights, drawingRelId: storeDrawing ? 'rId1' : '' })
         }
       ]
       : [
         {
           name: 'xl/worksheets/sheet1.xml',
-          data: sheetXml(mainHeaders, mainRows, [18, 44, 48, 20, 64, 12, 12, 12, 22, 22, 44, 14, 12, 12, 14, 42, 14, 18, 14, 22], {
+          data: sheetXml(productHeaders, mainRows, productWidths, {
             rowHeights: mainRowHeights,
             drawingRelId: mainDrawing ? 'rId1' : '',
             selected: true,
@@ -558,15 +638,7 @@
         },
         {
           name: 'xl/worksheets/sheet2.xml',
-          data: sheetXml(imageHeaders, imageRows, [18, 32, 10, 24, 54, 24, 44, 22, 60], {
-            rowHeights: imageRowHeights,
-            drawingRelId: imageDrawing ? 'rId1' : '',
-            textColumns: [0]
-          })
-        },
-        {
-          name: 'xl/worksheets/sheet3.xml',
-          data: sheetXml(notes[0], notes.slice(1), [18, 110])
+          data: sheetXml(notes[0], notes.slice(1), [18, 120])
         }
       ];
 

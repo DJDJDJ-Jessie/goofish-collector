@@ -1,0 +1,76 @@
+import fs from 'node:fs/promises';
+import vm from 'node:vm';
+
+const xlsxSource = await fs.readFile(new URL('../xlsx.js', import.meta.url), 'utf8');
+const fieldSource = await fs.readFile(new URL('../field-config.js', import.meta.url), 'utf8');
+const context = vm.createContext({ window: {}, globalThis: {}, Blob, Uint8Array, ArrayBuffer, TextEncoder, TextDecoder, URL, console });
+vm.runInContext(fieldSource, context);
+context.window.XianyuFieldConfig = context.XianyuFieldConfig;
+vm.runInContext(xlsxSource, context);
+
+const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const item = {
+  itemId: 'item-field-config-1',
+  itemUrl: 'https://www.goofish.com/item?id=item-field-config-1',
+  title: '测试商品',
+  description: '完整文案',
+  images: ['https://img.example/1.jpg', 'https://img.example/2.jpg'],
+  sellerName: '测试店铺',
+  collectedAt: '2026-08-12T12:00:00.000Z'
+};
+const assets = [1, 2].map(index => ({
+  kind: 'product',
+  itemKey: `id:${item.itemId}`,
+  itemId: item.itemId,
+  itemUrl: item.itemUrl,
+  imageIndex: index,
+  url: item.images[index - 1],
+  fileName: `测试商品_测试店铺_item-field-config-1_图0${index}.jpg`,
+  bytes: png,
+  extension: 'jpg',
+  width: 1,
+  height: 1
+}));
+
+const blob = context.window.XianyuXlsx.createWorkbook([item], assets, [], {
+  fieldConfig: {
+    product: ['itemId', 'description', 'images', 'sellerName']
+  }
+});
+const bytes = new Uint8Array(await blob.arrayBuffer());
+
+function readStoredZip(input) {
+  const entries = new Map();
+  const view = new DataView(input.buffer, input.byteOffset, input.byteLength);
+  let offset = 0;
+  while (offset + 4 <= input.length && view.getUint32(offset, true) === 0x04034b50) {
+    const size = view.getUint32(offset + 18, true);
+    const nameLength = view.getUint16(offset + 26, true);
+    const extraLength = view.getUint16(offset + 28, true);
+    const nameStart = offset + 30;
+    const name = new TextDecoder().decode(input.slice(nameStart, nameStart + nameLength));
+    const dataStart = nameStart + nameLength + extraLength;
+    entries.set(name, input.slice(dataStart, dataStart + size));
+    offset = dataStart + size;
+  }
+  return entries;
+}
+
+const entries = readStoredZip(bytes);
+const workbookXml = new TextDecoder().decode(entries.get('xl/workbook.xml'));
+const sheetXml = new TextDecoder().decode(entries.get('xl/worksheets/sheet1.xml'));
+if (!workbookXml.includes('name="商品数据"') || workbookXml.includes('图片索引')) {
+  throw new Error('product workbook should embed images in the product sheet without an image index sheet');
+}
+for (const header of ['商品ID', '商品文案', '商品图片', '商品图片2', '店铺名称']) {
+  if (!sheetXml.includes(header)) throw new Error(`configured product field is missing: ${header}`);
+}
+if (sheetXml.indexOf('商品文案') > sheetXml.indexOf('商品图片')) {
+  throw new Error('configured product field order was not preserved');
+}
+const drawing = new TextDecoder().decode(entries.get('xl/drawings/drawing1.xml'));
+if ((drawing.match(/<xdr:oneCellAnchor>/g) || []).length !== 2) {
+  throw new Error('both product images should be embedded in the product row');
+}
+
+console.log(JSON.stringify({ ok: true, productSheets: 2, embeddedProductImages: 2 }));

@@ -12,7 +12,10 @@
     maxEmbedImages: 1000,
     collectSellerInfo: true,
     notifyOnComplete: true,
-    keepHistoryDays: 30
+    keepHistoryDays: 30,
+    productFields: [],
+    storeProfileFields: [],
+    storeReviewFields: []
   };
   const TAB_MESSAGE_TIMEOUT_MS = 12000;
 
@@ -36,6 +39,8 @@
   let currentTaskJob = null;
   let taskJobs = [];
   let selectedTaskId = '';
+  let fieldConfigDraft = null;
+  let fieldConfigType = 'product';
 
   const SCREEN_META = {
     home: { kicker: 'WORKSPACE', title: '闲鱼研究助手', subtitle: '从公开详情页整理同行商品与店铺信息' },
@@ -198,11 +203,12 @@
     const storeCommitButton = $('storeCommitButton');
     const hasStoreData = hasCurrentStoreData();
     const hasPendingStore = Boolean(pendingCurrentStoreProfile);
+    const currentTaskOwnsTab = Boolean(currentTaskJob?.tabId && activeTab?.id && Number(currentTaskJob.tabId) === Number(activeTab.id));
     if (storeExportButton) {
-      storeExportButton.disabled = !isAccount || !hasStoreData || $('taskRail')?.dataset.active === 'true';
+      storeExportButton.disabled = !isAccount || !hasStoreData || (jobIsActive(currentTaskJob) && currentTaskOwnsTab);
     }
     if (storeCommitButton) {
-      storeCommitButton.disabled = !isAccount || !hasPendingStore || currentStoreCommitted || $('taskRail')?.dataset.active === 'true';
+      storeCommitButton.disabled = !isAccount || !hasPendingStore || currentStoreCommitted || (jobIsActive(currentTaskJob) && currentTaskOwnsTab);
       storeCommitButton.textContent = currentStoreCommitted ? '已加入数据中心店铺表' : '加到数据中心店铺表';
     }
 
@@ -317,13 +323,194 @@
     }
   }
 
+  function fieldCatalog() {
+    return window.XianyuFieldConfig || { fields: {}, defaults: {} };
+  }
+
+  function fieldDefinitions(type = fieldConfigType) {
+    return Array.isArray(fieldCatalog().fields?.[type]) ? fieldCatalog().fields[type] : [];
+  }
+
+  function defaultFieldIds(type) {
+    return [...(fieldCatalog().defaults?.[type] || fieldDefinitions(type).map(field => field.id))];
+  }
+
+  function normalizedFieldIds(type, value) {
+    const valid = new Set(fieldDefinitions(type).map(field => field.id));
+    const ids = Array.isArray(value) ? [...new Set(value.filter(id => valid.has(id)))] : [];
+    return ids.length ? ids : defaultFieldIds(type);
+  }
+
+  function fieldLabel(type, id) {
+    return fieldDefinitions(type).find(field => field.id === id)?.label || id;
+  }
+
+  function renderFieldSummaries() {
+    const types = [
+      ['product', 'productFieldSummary', 'productFieldTabCount'],
+      ['storeProfile', 'storeProfileFieldSummary', 'storeProfileFieldTabCount'],
+      ['storeReview', 'storeReviewFieldSummary', 'storeReviewFieldTabCount']
+    ];
+    for (const [type, summaryId, countId] of types) {
+      const ids = normalizedFieldIds(type, settings[`${type}Fields`]);
+      const summary = $(summaryId);
+      const count = $(countId);
+      if (summary) summary.textContent = `已选 ${ids.length} / ${fieldDefinitions(type).length} 个字段`;
+      if (count) count.textContent = ids.length;
+    }
+  }
+
+  function renderSettings() {
+    $('downloadAuto').checked = settings.downloadMode === 'auto';
+    $('downloadManual').checked = settings.downloadMode !== 'auto';
+    $('downloadFolder').value = settings.downloadFolder || '';
+    $('fileNameTemplate').value = settings.fileNameTemplate || '';
+    $('imageLimit').value = String(settings.imageLimit ?? 0);
+    $('maxEmbedImages').value = String(settings.maxEmbedImages ?? 1000);
+    $('collectSellerInfo').checked = settings.collectSellerInfo !== false;
+    $('saveAs').checked = Boolean(settings.saveAs);
+    $('notifyOnComplete').checked = settings.notifyOnComplete !== false;
+    renderFieldSummaries();
+    setMode(settings.mode || 'rpa', false);
+  }
+
+  function fieldConfigOpen(type = 'product') {
+    fieldConfigType = ['product', 'storeProfile', 'storeReview'].includes(type) ? type : 'product';
+    fieldConfigDraft = {
+      product: normalizedFieldIds('product', settings.productFields),
+      storeProfile: normalizedFieldIds('storeProfile', settings.storeProfileFields),
+      storeReview: normalizedFieldIds('storeReview', settings.storeReviewFields)
+    };
+    $('fieldConfigSearch').value = '';
+    $('fieldConfigModal').classList.remove('is-hidden');
+    renderFieldConfig();
+    $('fieldConfigSearch').focus();
+  }
+
+  function fieldMatches(field, query) {
+    const text = `${field.label} ${field.group || ''} ${field.id}`.toLowerCase();
+    return !query || text.includes(query.toLowerCase());
+  }
+
+  function renderFieldConfig() {
+    if (!fieldConfigDraft) return;
+    document.querySelectorAll('[data-field-tab]').forEach(button => {
+      const selected = button.dataset.fieldTab === fieldConfigType;
+      button.classList.toggle('is-selected', selected);
+      button.setAttribute('aria-selected', String(selected));
+    });
+    const definitions = fieldDefinitions(fieldConfigType);
+    const selectedIds = fieldConfigDraft[fieldConfigType];
+    const selectedSet = new Set(selectedIds);
+    const query = $('fieldConfigSearch').value.trim();
+    const available = definitions.filter(field => !selectedSet.has(field.id) && fieldMatches(field, query));
+    const selected = selectedIds
+      .map(id => definitions.find(field => field.id === id))
+      .filter(Boolean)
+      .filter(field => fieldMatches(field, query));
+    const availableList = $('availableFieldList');
+    const selectedList = $('selectedFieldList');
+    availableList.replaceChildren();
+    selectedList.replaceChildren();
+    for (const field of available) {
+      const row = document.createElement('div');
+      row.className = 'field-config-row available';
+      const copy = document.createElement('div');
+      copy.className = 'field-config-row-copy';
+      const label = document.createElement('strong');
+      label.textContent = field.label;
+      const group = document.createElement('small');
+      group.textContent = `${field.group || '字段'} · ${field.id}`;
+      copy.append(label, group);
+      const action = document.createElement('button');
+      action.className = 'field-row-action add';
+      action.type = 'button';
+      action.textContent = '添加';
+      action.addEventListener('click', () => {
+        fieldConfigDraft[fieldConfigType].push(field.id);
+        renderFieldConfig();
+      });
+      row.append(copy, action);
+      availableList.append(row);
+    }
+    for (const [index, field] of selected.entries()) {
+      const actualIndex = selectedIds.indexOf(field.id);
+      const row = document.createElement('div');
+      row.className = 'field-config-row selected';
+      const order = document.createElement('span');
+      order.className = 'field-row-order';
+      order.textContent = String(actualIndex + 1).padStart(2, '0');
+      const copy = document.createElement('div');
+      copy.className = 'field-config-row-copy';
+      const label = document.createElement('strong');
+      label.textContent = field.label;
+      const group = document.createElement('small');
+      group.textContent = `${field.group || '字段'} · ${field.id}`;
+      copy.append(label, group);
+      const actions = document.createElement('div');
+      actions.className = 'field-row-actions';
+      for (const [symbol, delta, title] of [['↑', -1, '上移'], ['↓', 1, '下移']]) {
+        const action = document.createElement('button');
+        action.className = 'field-row-action icon-action';
+        action.type = 'button';
+        action.title = title;
+        action.textContent = symbol;
+        action.disabled = (delta < 0 && actualIndex === 0) || (delta > 0 && actualIndex === selectedIds.length - 1);
+        action.addEventListener('click', () => {
+          const target = actualIndex + delta;
+          if (target < 0 || target >= selectedIds.length) return;
+          const [moved] = fieldConfigDraft[fieldConfigType].splice(actualIndex, 1);
+          fieldConfigDraft[fieldConfigType].splice(target, 0, moved);
+          renderFieldConfig();
+        });
+        actions.append(action);
+      }
+      const remove = document.createElement('button');
+      remove.className = 'field-row-action remove';
+      remove.type = 'button';
+      remove.title = '移除';
+      remove.textContent = '×';
+      remove.addEventListener('click', () => {
+        fieldConfigDraft[fieldConfigType].splice(actualIndex, 1);
+        if (!fieldConfigDraft[fieldConfigType].length) fieldConfigDraft[fieldConfigType] = defaultFieldIds(fieldConfigType).slice(0, 1);
+        renderFieldConfig();
+      });
+      actions.append(remove);
+      row.append(order, copy, actions);
+      selectedList.append(row);
+    }
+    $('availableFieldCount').textContent = String(available.length);
+    $('selectedFieldCount').textContent = String(fieldConfigDraft[fieldConfigType].length);
+    $('fieldConfigFooterCount').textContent = `已选 ${fieldConfigDraft[fieldConfigType].length} 个字段`;
+    $('fieldConfigTitle').textContent = `字段配置工作台 · ${fieldConfigType === 'product' ? '商品表' : fieldConfigType === 'storeProfile' ? '店铺资料表' : '店铺评价表'}`;
+  }
+
+  function closeFieldConfig() {
+    fieldConfigDraft = null;
+    $('fieldConfigModal').classList.add('is-hidden');
+  }
+
+  async function saveFieldConfig() {
+    if (!fieldConfigDraft) return;
+    const next = { ...settings, productFields: fieldConfigDraft.product, storeProfileFields: fieldConfigDraft.storeProfile, storeReviewFields: fieldConfigDraft.storeReview };
+    const response = await sendRuntime({ type: 'SAVE_SETTINGS', settings: next });
+    if (!response?.ok) throw new Error(response?.error || '保存字段设置失败');
+    settings = { ...settings, ...(response.settings || next) };
+    closeFieldConfig();
+    renderSettings();
+    setStatus('字段设置已保存；后续商品表、店铺资料表和店铺评价表都会使用新选择。', 'success');
+  }
+
   function setPageButtons(supported, pageType = currentPageType) {
     const active = Boolean($('taskRail').dataset.active === 'true');
-    $('collectButton').disabled = !supported || pageType !== 'detail' || active;
-    $('storeCollectButton').disabled = !supported || pageType !== 'account' || active;
+    const currentTaskOwnsTab = Boolean(currentTaskJob?.tabId && activeTab?.id && Number(currentTaskJob.tabId) === Number(activeTab.id));
+    const controlsBusy = active && currentTaskOwnsTab;
+    $('collectButton').disabled = !supported || pageType !== 'detail' || controlsBusy;
+    $('storeCollectButton').disabled = !supported || pageType !== 'account' || controlsBusy;
     $('diagnosticButton').disabled = !supported;
-    $('batchLinkButton').disabled = active;
-    $('searchCrawlButton').disabled = !supported || pageType !== 'search' || active;
+    $('storeProductsButton') && ($('storeProductsButton').disabled = !supported || pageType !== 'account' || controlsBusy);
+    $('batchLinkButton').disabled = controlsBusy;
+    $('searchCrawlButton').disabled = !supported || pageType !== 'search' || controlsBusy;
   }
 
   function updateHomePageContext({ supported = false, pageType = '', title = '', url = '' } = {}) {
@@ -439,11 +626,14 @@
     $('storeCount').textContent = response.storeCount || 0;
     storeDataReady = Number(response.storeCount || 0) > 0;
     const storeExportButton = $('storeExportButton');
+    const currentTaskOwnsTab = Boolean(currentTaskJob?.tabId && activeTab?.id && Number(currentTaskJob.tabId) === Number(activeTab.id));
     if (storeExportButton) {
-      storeExportButton.disabled = currentPageType !== 'account' || !hasCurrentStoreData() || $('taskRail')?.dataset.active === 'true';
+      storeExportButton.disabled = currentPageType !== 'account' || !hasCurrentStoreData() || (jobIsActive(currentTaskJob) && currentTaskOwnsTab);
     }
     const storeCommitButton = $('storeCommitButton');
     if (storeCommitButton) storeCommitButton.disabled = currentPageType !== 'account' || !pendingCurrentStoreProfile || currentStoreCommitted;
+    const storeProductsButton = $('storeProductsButton');
+    if (storeProductsButton) storeProductsButton.disabled = currentPageType !== 'account' || (jobIsActive(currentTaskJob) && currentTaskOwnsTab);
     const storeDataExportButton = $('storeDataExportButton');
     if (storeDataExportButton) storeDataExportButton.disabled = !storeDataReady;
   }
@@ -539,6 +729,10 @@
       $('homeTaskHint').textContent = '查看当前任务进度和完成结果';
       $('stopJobButton').disabled = true;
       $('stopJobButton').textContent = '停止任务';
+      if ($('taskPauseButton')) {
+        $('taskPauseButton').disabled = true;
+        $('taskPauseButton').textContent = '暂停任务';
+      }
       $('taskExportButton').disabled = true;
       if ($('taskCommitButton')) {
         $('taskCommitButton').disabled = true;
@@ -546,6 +740,7 @@
       }
       if ($('storeExportButton')) $('storeExportButton').disabled = currentPageType !== 'account' || !hasCurrentStoreData();
       if ($('storeCommitButton')) $('storeCommitButton').disabled = currentPageType !== 'account' || !pendingCurrentStoreProfile || currentStoreCommitted;
+      if ($('storeProductsButton')) $('storeProductsButton').disabled = currentPageType !== 'account';
       setPageButtons(Boolean(activeTab && isGoofishUrl(activeTab.url || '')));
       return;
     }
@@ -574,8 +769,11 @@
         ? '已加入数据中心商品表'
         : '加到数据中心商品表';
     }
-    if ($('storeExportButton')) $('storeExportButton').disabled = active || currentPageType !== 'account' || !hasCurrentStoreData();
-    if ($('storeCommitButton')) $('storeCommitButton').disabled = active || currentPageType !== 'account' || !pendingCurrentStoreProfile || currentStoreCommitted;
+    const currentTaskOwnsTab = Boolean(job.tabId && activeTab?.id && Number(job.tabId) === Number(activeTab.id));
+    const controlsBusy = active && currentTaskOwnsTab;
+    if ($('storeExportButton')) $('storeExportButton').disabled = controlsBusy || currentPageType !== 'account' || !hasCurrentStoreData();
+    if ($('storeCommitButton')) $('storeCommitButton').disabled = controlsBusy || currentPageType !== 'account' || !pendingCurrentStoreProfile || currentStoreCommitted;
+    if ($('storeProductsButton')) $('storeProductsButton').disabled = controlsBusy || currentPageType !== 'account';
 
     const progress = job.type === 'links'
       ? `详情链接 ${Math.min(Number(job.index || 0), job.links?.length || 0)}/${job.links?.length || 0}，成功 ${job.collected || 0} 条`
@@ -596,7 +794,7 @@
     $('homeTaskHint').textContent = `${stateText} · ${job.collected || 0} 条成功记录`;
     $('currentState').textContent = active ? '任务运行中' : stateText;
     setPageButtons(Boolean(activeTab && isGoofishUrl(activeTab.url || '')));
-    $('collectButton').disabled = active;
+    $('collectButton').disabled = controlsBusy;
 
     const isNewJob = job.id && job.id !== lastJobId;
     lastJobId = job.id || '';
@@ -690,7 +888,9 @@
         exportButton.textContent = '导出';
         exportButton.addEventListener('click', () => {
           selectedTaskId = job.id;
-          void exportTaskResult().catch(error => setStatus(error.message, 'error'));
+          void refreshJob()
+            .then(() => exportTaskResult())
+            .catch(error => setStatus(error.message, 'error'));
         });
         actions.append(exportButton);
       }
@@ -877,6 +1077,39 @@
       button.textContent = '采集当前店铺页';
       await refreshCurrentPage().catch(() => {});
       renderStoreStatus(currentPageType, currentStoreStatus);
+    }
+  }
+
+  async function startStoreProducts() {
+    if (!activeTab?.id || currentPageType !== 'account') {
+      setStatus('请先打开闲鱼店铺/账号页，再启动店铺全部商品采集。', 'error');
+      return;
+    }
+    const button = $('storeProductsButton');
+    if (button) {
+      button.disabled = true;
+      button.textContent = '正在启动店铺商品任务…';
+    }
+    try {
+      const response = await sendRuntime({
+        type: 'START_STORE_PRODUCTS',
+        storeUrl: activeTab.url,
+        mode: selectedMode,
+        delayMs: 2200
+      });
+      if (!response?.ok) throw new Error(response?.error || '启动店铺全部商品采集失败');
+      selectedTaskId = response.job?.id || '';
+      setStatus('店铺全部商品采集任务已启动；会在独立标签页读取商品并逐个进入详情。', 'success');
+      await refreshTasks();
+      showScreen('task', true, 'tasks');
+      await refreshJob();
+    } catch (error) {
+      setStatus(error.message || '启动店铺全部商品采集失败。', 'error');
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = '采集店铺全部商品详情';
+      }
     }
   }
 
@@ -1290,19 +1523,6 @@
     setStatus('历史任务已删除。', 'success');
   }
 
-  function renderSettings() {
-    $('downloadAuto').checked = settings.downloadMode === 'auto';
-    $('downloadManual').checked = settings.downloadMode !== 'auto';
-    $('downloadFolder').value = settings.downloadFolder || '';
-    $('fileNameTemplate').value = settings.fileNameTemplate || '';
-    $('imageLimit').value = String(settings.imageLimit ?? 0);
-    $('maxEmbedImages').value = String(settings.maxEmbedImages ?? 1000);
-    $('collectSellerInfo').checked = settings.collectSellerInfo !== false;
-    $('saveAs').checked = Boolean(settings.saveAs);
-    $('notifyOnComplete').checked = settings.notifyOnComplete !== false;
-    setMode(settings.mode || 'rpa', false);
-  }
-
   async function loadSettings() {
     const response = await sendRuntime({ type: 'GET_SETTINGS' });
     if (!response?.ok) throw new Error(response?.error || '读取设置失败');
@@ -1347,6 +1567,7 @@
     $('currentCommitButton').addEventListener('click', () => commitCurrentItems());
     $('currentExportButton').addEventListener('click', () => exportCurrentItems());
     $('storeCollectButton').addEventListener('click', () => collectCurrentStorePage());
+    $('storeProductsButton')?.addEventListener('click', () => startStoreProducts());
     $('storeCommitButton').addEventListener('click', () => commitCurrentStore());
     $('storeExportButton').addEventListener('click', () => exportItems($('storeExportButton')).catch(error => setStatus(error.message, 'error')));
     $('storeDataButton').addEventListener('click', () => { setDataTab('stores'); showScreen('data'); });
@@ -1371,6 +1592,27 @@
       button.addEventListener('click', () => setDataTab(button.dataset.openDataTab));
     });
     $('saveSettingsButton').addEventListener('click', () => saveSettings().catch(error => setStatus(error.message, 'error')));
+    document.querySelectorAll('[data-open-fields]').forEach(button => {
+      button.addEventListener('click', () => fieldConfigOpen(button.dataset.openFields));
+    });
+    document.querySelectorAll('[data-field-tab]').forEach(button => {
+      button.addEventListener('click', () => {
+        fieldConfigType = button.dataset.fieldTab;
+        renderFieldConfig();
+      });
+    });
+    $('fieldConfigSearch')?.addEventListener('input', () => renderFieldConfig());
+    $('resetFieldConfigButton')?.addEventListener('click', () => {
+      if (!fieldConfigDraft) return;
+      fieldConfigDraft[fieldConfigType] = defaultFieldIds(fieldConfigType);
+      renderFieldConfig();
+    });
+    $('closeFieldConfigButton')?.addEventListener('click', closeFieldConfig);
+    $('cancelFieldConfigButton')?.addEventListener('click', closeFieldConfig);
+    $('saveFieldConfigButton')?.addEventListener('click', () => saveFieldConfig().catch(error => setStatus(error.message, 'error')));
+    $('fieldConfigModal')?.addEventListener('click', event => {
+      if (event.target.id === 'fieldConfigModal') closeFieldConfig();
+    });
     $('linkInput').addEventListener('input', () => {
       const links = parseProductLinks($('linkInput').value);
       $('linkCount').textContent = `${links.length} 个链接`;

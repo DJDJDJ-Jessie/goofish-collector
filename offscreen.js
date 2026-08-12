@@ -1,8 +1,11 @@
 (() => {
   'use strict';
 
-  const MAX_IMAGE_SIDE = 1600;
-  const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+  // Prefer the original CDN bytes.  The previous 1600px/8MB cap visibly
+  // blurred large product cards before Excel embedding; conversion is now a
+  // fallback only for unsupported or genuinely oversized image payloads.
+  const MAX_IMAGE_SIDE = 8192;
+  const MAX_IMAGE_BYTES = 24 * 1024 * 1024;
   // 评价图片不与商品图片共用商品图上限；这个值只是防止异常页面一次性生成
   // 过大的工作簿。正常店铺评价数量远低于此值。
   const MAX_REVIEW_IMAGE_ASSETS = 20000;
@@ -105,7 +108,7 @@
       }
       context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
       const outputMime = sourceMime === 'image/png' ? 'image/png' : 'image/jpeg';
-      const outputBlob = await canvasToBlob(canvas, outputMime, 0.86);
+      const outputBlob = await canvasToBlob(canvas, outputMime, 0.96);
       return {
         bytes: new Uint8Array(await outputBlob.arrayBuffer()),
         mime: outputMime,
@@ -118,12 +121,41 @@
     }
   }
 
+  function imageCandidates(sourceUrl) {
+    const values = [String(sourceUrl || '')].filter(Boolean);
+    try {
+      const parsed = new URL(sourceUrl);
+      const clean = new URL(parsed.href);
+      for (const key of [...clean.searchParams.keys()]) {
+        if (/resize|width|height|quality|thumbnail|thumb|process/i.test(key)) clean.searchParams.delete(key);
+      }
+      if (clean.href !== parsed.href) values.push(clean.href);
+      const cleanPath = parsed.pathname.replace(/([_-])\d{2,5}x\d{2,5}(?=\.[a-z\d]{2,6}$)/i, '');
+      if (cleanPath !== parsed.pathname) {
+        const pathUrl = new URL(parsed.href);
+        pathUrl.pathname = cleanPath;
+        values.push(pathUrl.href);
+      }
+    } catch (_) {
+      // Keep the original URL as the only candidate when it is not absolute.
+    }
+    return [...new Set(values)];
+  }
+
   async function downloadImage(sourceUrl) {
-    const response = await fetch(sourceUrl, { credentials: 'omit', redirect: 'follow' });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const blob = await response.blob();
-    if (!blob.size) throw new Error('图片为空');
-    return decodeImageBlob(blob, sourceUrl);
+    let lastError = null;
+    for (const candidate of imageCandidates(sourceUrl)) {
+      try {
+        const response = await fetch(candidate, { credentials: 'omit', redirect: 'follow' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const blob = await response.blob();
+        if (!blob.size) throw new Error('图片为空');
+        return decodeImageBlob(blob, candidate);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError || new Error('图片下载失败');
   }
 
   async function prepareImageAssets(items, settings, storeProfiles) {
@@ -218,7 +250,12 @@
     const storeProfiles = Array.isArray(message.storeProfiles) ? message.storeProfiles : [];
     const prepared = await prepareImageAssets(items, message.settings || {}, storeProfiles);
     const blob = window.XianyuXlsx.createWorkbook(items, prepared.assets, storeProfiles, {
-      kind: message.exportKind || 'product'
+      kind: message.exportKind || 'product',
+      fieldConfig: message.fieldConfig || {
+        product: message.settings?.productFields,
+        storeProfile: message.settings?.storeProfileFields,
+        storeReview: message.settings?.storeReviewFields
+      }
     });
     const url = URL.createObjectURL(blob);
     const embedded = prepared.assets.filter(asset => asset.bytes?.length).length;

@@ -1,5 +1,7 @@
 'use strict';
 
+if (typeof importScripts === 'function') importScripts('field-config.js');
+
 const STORAGE_KEY = 'xianyu_public_items_v1';
 const STORE_PROFILES_KEY = 'xianyu_public_store_profiles_v1';
 const JOB_KEY = 'xianyu_collect_job_v1';
@@ -40,8 +42,20 @@ const DEFAULT_SETTINGS = Object.freeze({
   maxEmbedImages: 1000,
   collectSellerInfo: true,
   notifyOnComplete: true,
-  keepHistoryDays: 30
+  keepHistoryDays: 30,
+  productFields: ['itemId', 'itemUrl', 'mainImageName', 'images', 'description', 'viewCount', 'wantCount', 'price', 'category', 'sellerName', 'sellerUrl', 'sellerLocation', 'sellerFollowers', 'sellerFollowing', 'sellerProductCount', 'sellerIntro', 'storeDuration', 'itemGoodRate', 'sellerReviewCount', 'collectedAt'],
+  storeProfileFields: ['sellerName', 'sellerUrl', 'sellerLocation', 'sellerFollowers', 'sellerFollowing', 'sellerProductCount', 'sellerIntro', 'sellerReviewCount', 'collectedAt'],
+  storeReviewFields: ['sellerName', 'sellerUrl', 'reviewIndex', 'reviewer', 'role', 'feedback', 'timeIp', 'reviewImageCount', 'reviewImageNames', 'reviewImageStatus', 'reviewImages', 'reviewImageFailureUrl', 'reviewCollectedAt']
 });
+
+const FIELD_CATALOG = globalThis.XianyuFieldConfig || {
+  fields: {},
+  defaults: {
+    product: DEFAULT_SETTINGS?.productFields || [],
+    storeProfile: DEFAULT_SETTINGS?.storeProfileFields || [],
+    storeReview: DEFAULT_SETTINGS?.storeReviewFields || []
+  }
+};
 
 const ARRAY_FIELDS = new Set(['images', 'reviewSamples']);
 const ALLOWED_FIELDS = [
@@ -377,6 +391,16 @@ function normalizeSettings(input = {}) {
     .replace(/\.xlsx$/i, '')
     .trim() || DEFAULT_SETTINGS.fileNameTemplate;
 
+  const normalizeFieldSelection = (value, type, fallback) => {
+    const definitions = Array.isArray(FIELD_CATALOG.fields?.[type]) ? FIELD_CATALOG.fields[type] : [];
+    const valid = new Set(definitions.map(field => field.id));
+    const selected = Array.isArray(value)
+      ? [...new Set(value.map(field => cleanText(field, 100)).filter(field => valid.has(field)))]
+      : [];
+    if (selected.length) return selected;
+    return [...new Set((fallback || []).filter(field => valid.size === 0 || valid.has(field)))];
+  };
+
   return {
     ...DEFAULT_SETTINGS,
     ...input,
@@ -389,7 +413,10 @@ function normalizeSettings(input = {}) {
     maxEmbedImages: Math.max(1, Math.min(1000, Number(input.maxEmbedImages) || DEFAULT_SETTINGS.maxEmbedImages)),
     collectSellerInfo: input.collectSellerInfo !== false,
     notifyOnComplete: input.notifyOnComplete !== false,
-    keepHistoryDays: Math.max(1, Math.min(365, Number(input.keepHistoryDays) || DEFAULT_SETTINGS.keepHistoryDays))
+    keepHistoryDays: Math.max(1, Math.min(365, Number(input.keepHistoryDays) || DEFAULT_SETTINGS.keepHistoryDays)),
+    productFields: normalizeFieldSelection(input.productFields, 'product', DEFAULT_SETTINGS.productFields),
+    storeProfileFields: normalizeFieldSelection(input.storeProfileFields, 'storeProfile', DEFAULT_SETTINGS.storeProfileFields),
+    storeReviewFields: normalizeFieldSelection(input.storeReviewFields, 'storeReview', DEFAULT_SETTINGS.storeReviewFields)
   };
 }
 
@@ -851,6 +878,8 @@ function downloadFileName(settings, count, type, mode) {
     count: String(count),
     type: type === 'links'
       ? '链接批量'
+      : type === 'store-products'
+        ? '店铺商品'
       : type === 'store'
         ? '店铺资料'
         : type === 'detail'
@@ -893,6 +922,11 @@ function runExport(items, settings, context = {}) {
       storeProfiles: Array.isArray(context.storeProfiles) ? context.storeProfiles : [],
       exportKind: exportType === 'store' ? 'store' : 'product',
       settings: normalizeSettings(settings),
+      fieldConfig: {
+        product: normalizeSettings(settings).productFields,
+        storeProfile: normalizeSettings(settings).storeProfileFields,
+        storeReview: normalizeSettings(settings).storeReviewFields
+      },
       filename
     });
     if (!prepared?.ok || !prepared.url) {
@@ -1297,7 +1331,7 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
   }
   if (!(await canContinueJob(job))) return { kind: 'cancelled', job: await readJob() };
   if (!sellerUrl) {
-    const currentLink = job.type === 'links'
+    const currentLink = ['links', 'store-products'].includes(job.type)
       ? job.links?.[job.index]
       : job.pageLinks?.[job.detailIndex];
     return {
@@ -1492,6 +1526,9 @@ async function advanceLinkJob(job, failureMessage = '') {
     failures,
     retries: 0,
     pagesProcessed: nextIndex,
+    visited: ['store-products'].includes(job.type)
+      ? Number(job.visited || 0) + 1
+      : Number(job.visited || 0),
     pendingItem: null,
     pendingSellerUrl: '',
     pendingSellerKey: '',
@@ -1552,6 +1589,47 @@ async function processLinkJob(job) {
       return scheduleJob({ ...job, retries }, 'ready-to-collect', 1500);
     }
     return advanceLinkJob({ ...job, retries: 0 }, error.message || String(error));
+  }
+}
+
+async function processStoreProductsPage(job) {
+  if (!(await canContinueJob(job))) return readJob(job.id);
+  try {
+    const pageInfo = await ensureContentReceiver(job.tabId);
+    if (pageInfo?.pageType !== 'account') throw new Error('当前页面不是店铺账号页，无法发现店铺商品。');
+    const result = await sendTabMessage(job.tabId, { type: 'GET_STORE_PRODUCT_LINKS' }, 75_000);
+    if (!result?.ok) throw new Error(result?.error || '没有收到店铺商品链接');
+    const byKey = new Map();
+    for (const raw of Array.isArray(result.items) ? result.items : []) {
+      const item = compactSearchLink(raw);
+      const key = searchLinkKey(item);
+      if (item && key && !byKey.has(key)) byKey.set(key, item);
+    }
+    const links = [...byKey.values()];
+    if (!links.length) {
+      const retries = Number(job.storePageRetries || 0) + 1;
+      if (retries <= 3) return scheduleJob({ ...job, storePageRetries: retries }, 'ready-to-collect', 2600);
+      return finishJob(job, 'failed', '店铺页没有发现可进入的商品详情链接；请确认店铺商品列表已经加载完成。');
+    }
+    const next = {
+      ...job,
+      stage: 'detail-page',
+      links,
+      index: 0,
+      targetCount: links.length,
+      storePageRetries: 0,
+      pagesProcessed: 1,
+      retries: 0,
+      message: `已从店铺页发现 ${links.length} 个商品，正在打开第 1 个详情页…`
+    };
+    const waiting = jobMessage({ ...next, status: 'waiting-page' }, next.message);
+    await writeJob(waiting);
+    await tabsUpdate(job.tabId, { url: links[0].itemUrl });
+    return scheduleJob(waiting, 'ready-to-collect', Math.max(1700, Number(job.delayMs) || 1800));
+  } catch (error) {
+    const retries = Number(job.retries || 0) + 1;
+    if (retries <= 2) return scheduleJob({ ...job, retries }, 'ready-to-collect', 1800);
+    return finishJob({ ...job, retries }, 'failed', `店铺商品链接发现失败：${error.message || String(error)}`);
   }
 }
 
@@ -1933,7 +2011,7 @@ async function finishPendingSellerStep(job, profile = null, errorMessage = '') {
     };
   }
 
-  if (job.type === 'links') {
+  if (['links', 'store-products'].includes(job.type)) {
     return advanceLinkJob({
       ...next,
       collected: Number(job.collected || 0) + count
@@ -1972,6 +2050,8 @@ async function processJobAlarm(alarmName = JOB_ALARM) {
   const job = normalizeSearchJob(rawJob);
   const collectingMessage = job.stage === 'account-page'
     ? '正在读取卖家账号页的公开简介和评价…'
+    : job.type === 'store-products' && job.stage === 'store-page'
+      ? '正在读取店铺页的全部商品详情链接…'
     : job.type === 'search' && job.stage === 'search-page'
       ? '正在读取当前搜索页的商品详情链接…'
       : '正在采集当前商品详情页…';
@@ -1979,7 +2059,8 @@ async function processJobAlarm(alarmName = JOB_ALARM) {
   await writeJob(jobMessage(collecting, collectingMessage));
   if (!(await canContinueJob(collecting))) return readJob(collecting.id);
   if (job.stage === 'account-page') await processAccountPage(collecting);
-  else if (job.type === 'links') await processLinkJob(collecting);
+  else if (job.type === 'store-products' && job.stage === 'store-page') await processStoreProductsPage(collecting);
+  else if (['links', 'store-products'].includes(job.type)) await processLinkJob(collecting);
   else if (job.type === 'search' && job.stage === 'detail-page') await processSearchDetail(collecting);
   else if (job.type === 'search') await processSearchPage(collecting);
 }
@@ -2017,6 +2098,52 @@ async function startLinksJob(links, delayMs = 1500, mode = 'rpa') {
   };
   await writeJob(job);
   return scheduleJob(job, 'ready-to-collect', 1400);
+}
+
+async function startStoreProductsJob(storeUrl, delayMs = 1800, mode = 'rpa') {
+  let parsed;
+  try {
+    parsed = new URL(storeUrl);
+  } catch (_) {
+    throw new Error('采集店铺全部商品需要有效的闲鱼店铺页链接。');
+  }
+  if (!parsed.hostname.endsWith('goofish.com') || !/^\/personal(?:[/?#]|$)/i.test(parsed.pathname)) {
+    throw new Error('采集店铺全部商品只能从闲鱼店铺/账号页启动。');
+  }
+  const settings = await readSettings();
+  const tab = await tabsCreate({ url: storeUrl, active: false });
+  const now = new Date().toISOString();
+  const job = {
+    id: `store-products-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    type: 'store-products',
+    mode: mode === 'api' ? 'api' : 'rpa',
+    status: 'waiting-page',
+    stage: 'store-page',
+    storeUrl: cleanUrl(storeUrl),
+    links: [],
+    index: 0,
+    targetCount: 0,
+    pagesProcessed: 0,
+    collected: 0,
+    visited: 0,
+    stagedItems: [],
+    committedToDataCenter: false,
+    resultKeys: [],
+    sellerProfiles: {},
+    sellerFailures: [],
+    qualityWarnings: [],
+    collectSellerInfo: settings.collectSellerInfo !== false,
+    failures: [],
+    retries: 0,
+    storePageRetries: 0,
+    delayMs: Math.max(1500, Number(delayMs) || 1800),
+    tabId: tab.id,
+    createdAt: now,
+    updatedAt: now,
+    message: '已打开店铺采集标签页，正在读取店铺下的全部公开商品…'
+  };
+  await writeJob(job);
+  return scheduleJob(job, 'ready-to-collect', 1800);
 }
 
 async function startSearchJob(startUrl, targetCount, maxPages, delayMs = 1800, mode = 'rpa') {
@@ -2490,6 +2617,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return {
           ok: true,
           job: await startSearchJob(startUrl, message.targetCount, message.maxPages, message.delayMs, message.mode || settings.mode)
+        };
+      }
+
+      case 'START_STORE_PRODUCTS': {
+        const storeUrl = cleanUrl(message.storeUrl || sender?.tab?.url || '');
+        if (!storeUrl || !storeUrl.includes('goofish.com')) throw new Error('请先在闲鱼店铺/账号页启动店铺商品采集。');
+        const settings = await readSettings();
+        return {
+          ok: true,
+          job: await startStoreProductsJob(storeUrl, message.delayMs, message.mode || settings.mode)
         };
       }
 
