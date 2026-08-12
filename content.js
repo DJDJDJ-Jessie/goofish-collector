@@ -426,6 +426,12 @@
   }
 
   function detailTitleFromRoot(root) {
+    const titleNode = root?.querySelector?.(
+      'h1, [data-testid*="item-title"], [class^="item-title--"], [class*=" item-title--"], [class^="title--"], [class*=" title--"]'
+    );
+    const explicitTitle = oneLine(titleNode?.getAttribute?.('title') || titleNode?.textContent || '', 1000);
+    if (explicitTitle && !/[¥￥]\s*[\d,.]+/.test(explicitTitle)) return explicitTitle;
+
     const descriptionNode = root?.querySelector?.(
       '[class^="desc--"], [class*=" desc--"], [class*="description--"], [class*="Description--"]'
     );
@@ -848,42 +854,67 @@
     return unique(samples).slice(0, 20);
   }
 
-  function descriptionFromRoot(root) {
-    const detailNode = root?.querySelector?.(
-      '[class^="desc--"], [class*=" desc--"], [class*="description--"], [class*="Description--"]'
-    );
-    const detailText = cleanText(detailNode?.innerText || detailNode?.textContent || '', 12000);
-    if (detailText.length >= 8) return detailText;
+  function descriptionScopeCandidates(root = document) {
+    const selector = '[class^="desc--"], [class*=" desc--"], [class*="description--"], [class*="Description--"], [data-testid*="description"], [data-testid*="desc"], [class*="detail-content"], [class*="DetailContent"]';
+    const nodes = [...(root?.querySelectorAll?.(selector) || [])];
+    const candidates = [];
+    const add = (node, priority) => {
+      if (!node || node === root) return;
+      candidates.push({ node, priority });
+    };
 
-    const meta = document.querySelector('meta[name="description"], meta[property="og:description"]');
-    const metaText = oneLine(meta?.getAttribute('content') || '', 12000);
-    if (metaText) return metaText;
+    for (const node of nodes) {
+      add(node, 100);
+      let parent = node.parentElement;
+      for (let level = 0; level < 2 && parent; level++, parent = parent.parentElement) add(parent, 92 - level * 4);
+    }
 
-    const selectors = [
-      '[data-testid*="description"]', '[data-testid*="desc"]',
-      '[class*="description"]', '[class*="Description"]',
-      '[class*="detail-content"]', '[class*="DetailContent"]',
-      '[class*="desc"]', '[class*="Desc"]'
-    ];
-    const values = [];
-    for (const selector of selectors) {
-      for (const node of root?.querySelectorAll?.(selector) || []) {
-        const value = cleanText(node.textContent || '', 12000);
-        if (value.length >= 8) values.push(value);
+    // 部分版本的详情文案容器没有稳定 class，只给折叠按钮保留“展开”文字。
+    // 以按钮附近的最小可见祖先为候选，并排除推荐区/搜索卡片，避免把“更多”
+    // 当成商品文案；这个候选优先级高于泛 description class。
+    for (const control of root?.querySelectorAll?.('button, [role="button"], a, span, div') || []) {
+      const label = expandableLabel(control);
+      if (!/^(?:展开|展开全文|查看更多|更多)(?:内容|详情|文案)?$/.test(label) || !isVisibleControl(control)) continue;
+      let parent = control.parentElement;
+      for (let level = 0; level < 5 && parent; level++, parent = parent.parentElement) {
+        const className = oneLine(parent.getAttribute?.('class') || '', 300);
+        const text = cleanText(parent.innerText || parent.textContent || '', 12000);
+        const itemLinkCount = parent.querySelectorAll?.('a[href*="/item"], a[href*="itemId="]')?.length || 0;
+        if (text.length >= 80 && text.length <= 12000
+          && itemLinkCount <= 2
+          && !/(?:recommend|推荐|猜你喜欢|feed|search-result|related|sidebar|footer|header|seller-info|评论区|评价区)/i.test(className)) {
+          add(parent, 132 - level * 5);
+          break;
+        }
       }
     }
-    return values.sort((a, b) => b.length - a.length)[0] || '';
+
+    const byNode = new Map();
+    for (const candidate of candidates) {
+      const old = byNode.get(candidate.node);
+      if (!old || candidate.priority > old.priority) byNode.set(candidate.node, candidate);
+    }
+    return [...byNode.values()].sort((first, second) => second.priority - first.priority);
   }
 
   function detailDescriptionScopes(root = document) {
-    const selector = '[class^="desc--"], [class*=" desc--"], [class*="description--"], [class*="Description--"], [data-testid*="description"], [data-testid*="desc"], [class*="detail-content"], [class*="DetailContent"]';
-    const nodes = [...(root?.querySelectorAll?.(selector) || [])];
-    return unique(nodes.flatMap(node => {
-      const scopes = [node];
-      let parent = node.parentElement;
-      for (let level = 0; level < 2 && parent; level++, parent = parent.parentElement) scopes.push(parent);
-      return scopes;
-    }));
+    return descriptionScopeCandidates(root).map(candidate => candidate.node);
+  }
+
+  function descriptionFromRoot(root) {
+    const candidates = descriptionScopeCandidates(root)
+      .map(candidate => ({
+        ...candidate,
+        text: cleanText(candidate.node?.innerText || candidate.node?.textContent || '', 12000)
+      }))
+      .filter(candidate => candidate.text.length >= 8)
+      .sort((first, second) => second.priority - first.priority || second.text.length - first.text.length);
+    if (candidates[0]?.text) return candidates[0].text;
+
+    // meta description 往往只是分享卡片摘要，只有页面没有可读正文时才使用，
+    // 避免“满足条件时……链接”这类平台摘要抢占商品文案字段。
+    const meta = document.querySelector('meta[name="description"], meta[property="og:description"]');
+    return oneLine(meta?.getAttribute('content') || '', 12000);
   }
 
   function expandableLabel(node) {
@@ -893,7 +924,11 @@
         || node?.textContent
         || '',
       80
-    ).replace(/\s+/g, '');
+    )
+      .replace(/\s+/g, '')
+      // 闲鱼不同版本会把下拉箭头、省略号或冒号一起放在“展开”按钮文本里；
+      // 这些装饰不应让长文案展开逻辑退回到分享摘要。
+      .replace(/[\u2304⌄∨▼﹀v…．.：:]+$/i, '');
   }
 
   async function expandDetailDescription(root = document) {

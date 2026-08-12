@@ -158,12 +158,16 @@
     throw lastError || new Error('图片下载失败');
   }
 
-  async function prepareImageAssets(items, settings, storeProfiles) {
+  async function prepareImageAssets(items, settings, storeProfiles, fieldConfig = {}) {
     const perItemLimit = Math.max(0, Number(settings?.imageLimit) || 0);
     const maxImages = Math.max(1, Math.min(1000, Number(settings?.maxEmbedImages) || 1000));
+    const productFields = Array.isArray(fieldConfig.product) ? fieldConfig.product : null;
+    const reviewFields = Array.isArray(fieldConfig.storeReview) ? fieldConfig.storeReview : null;
+    const needProductImages = !productFields || productFields.some(field => ['images', 'mainImageName', 'imageStatus'].includes(field));
+    const needReviewImages = !reviewFields || reviewFields.some(field => ['reviewImages', 'reviewImageNames', 'reviewImageStatus', 'reviewImageFailureUrl'].includes(field));
     const candidates = [];
 
-    for (const item of items) {
+    for (const item of needProductImages ? items : []) {
       const urls = [...new Set((Array.isArray(item.images) ? item.images : []).filter(Boolean))];
       const selected = perItemLimit > 0 ? urls.slice(0, perItemLimit) : urls;
       selected.forEach((url, index) => candidates.push({
@@ -175,7 +179,7 @@
       }));
     }
 
-    for (const profile of Array.isArray(storeProfiles) ? storeProfiles : []) {
+    for (const profile of needReviewImages ? (Array.isArray(storeProfiles) ? storeProfiles : []) : []) {
       for (const review of Array.isArray(profile?.reviews) ? profile.reviews : []) {
         const urls = [...new Set((Array.isArray(review?.images) ? review.images : []).filter(Boolean))];
         urls.forEach((url, index) => candidates.push({
@@ -248,14 +252,15 @@
   async function exportWorkbook(message) {
     const items = Array.isArray(message.items) ? message.items : [];
     const storeProfiles = Array.isArray(message.storeProfiles) ? message.storeProfiles : [];
-    const prepared = await prepareImageAssets(items, message.settings || {}, storeProfiles);
+    const fieldConfig = message.fieldConfig || {
+      product: message.settings?.productFields,
+      storeProfile: message.settings?.storeProfileFields,
+      storeReview: message.settings?.storeReviewFields
+    };
+    const prepared = await prepareImageAssets(items, message.settings || {}, storeProfiles, fieldConfig);
     const blob = window.XianyuXlsx.createWorkbook(items, prepared.assets, storeProfiles, {
       kind: message.exportKind || 'product',
-      fieldConfig: message.fieldConfig || {
-        product: message.settings?.productFields,
-        storeProfile: message.settings?.storeProfileFields,
-        storeReview: message.settings?.storeReviewFields
-      }
+      fieldConfig
     });
     const url = URL.createObjectURL(blob);
     const embedded = prepared.assets.filter(asset => asset.bytes?.length).length;

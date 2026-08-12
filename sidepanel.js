@@ -90,9 +90,14 @@
   }
 
   function goBack() {
-    const previous = screenParent || 'home';
+    // 任务详情是从任务中心进入的，返回必须回到任务中心；其它一级功能页
+    // 统一回首页。不要依赖一个可被后续轮询覆盖的“当前任务”来决定返回目的地。
+    const previous = currentScreen === 'task'
+      ? (screenParent === 'tasks' ? 'tasks' : 'home')
+      : (screenParent || 'home');
     screenParent = 'home';
     showScreen(previous, false);
+    if (previous === 'tasks') void refreshTasks().catch(() => {});
   }
 
   function isGoofishUrl(url) {
@@ -857,6 +862,8 @@
       summary.className = 'task-center-summary';
       summary.textContent = job.type === 'links'
         ? `详情页 ${Math.min(Number(job.index || 0), job.links?.length || 0)}/${job.links?.length || 0} · 成功 ${job.collected || 0} 条`
+        : job.type === 'store-products'
+          ? `店铺商品详情 ${job.visited || 0}/${job.targetCount || job.links?.length || '全部'} · 成功 ${job.collected || 0} 条`
         : `详情页 ${job.visited || 0}/${job.targetCount || job.links?.length || '全部'} · 成功 ${job.collected || 0} 条`;
       const meta = document.createElement('small');
       meta.textContent = `${formatDate(job.updatedAt || job.createdAt)} · ${job.message || ''}`;
@@ -1452,7 +1459,11 @@
   }
 
   function historyType(entry) {
-    return entry.type === 'links' ? '链接批量' : '搜索跨页';
+    if (entry.type === 'links') return '链接批量';
+    if (entry.type === 'store-products') return '店铺全部商品';
+    if (entry.type === 'store') return '店铺资料与评价';
+    if (entry.type === 'detail') return '当前详情';
+    return '搜索跨页';
   }
 
   async function refreshHistory() {

@@ -19,6 +19,7 @@ const TAB_MESSAGE_TIMEOUT_MS = 12000;
 const JOB_STALE_TIMEOUT_MS = 90000;
 const MAX_TASKS = 100;
 const cancelledJobIds = new Set();
+let jobWriteQueue = Promise.resolve();
 
 function markJobCancelled(jobId) {
   if (!jobId) return;
@@ -568,14 +569,21 @@ async function writeJobs(jobs) {
   return normalized;
 }
 
-async function writeJob(job, options = {}) {
-  if (!job?.id) return readJob();
-  if (!options.force && isJobCancelled(job)) return readJob(job.id);
-  const jobs = await readJobs();
-  const next = jobs.filter(candidate => candidate.id !== job.id);
-  next.push(job);
-  await writeJobs(next);
-  return job;
+function writeJob(job, options = {}) {
+  // 多个任务可以同时推进；Service Worker 的 alarm/tabs 回调也可能交错到达。
+  // 如果这里直接 read -> write，两个任务会读到同一份旧数组，后写入的任务会
+  // 把先写入的任务覆盖掉，表现为任务中心“少了一条任务”。所有任务写入必须串行。
+  const operation = jobWriteQueue.then(async () => {
+    if (!job?.id) return readJob();
+    if (!options.force && isJobCancelled(job)) return readJob(job.id);
+    const jobs = await readJobs();
+    const next = jobs.filter(candidate => candidate.id !== job.id);
+    next.push(job);
+    await writeJobs(next);
+    return job;
+  });
+  jobWriteQueue = operation.catch(() => {});
+  return operation;
 }
 
 async function findJobByTabId(tabId, options = {}) {
@@ -710,7 +718,7 @@ async function recoverStaleJob(job) {
   return finishJob(
     { ...job, staleRecovered: true },
     'failed',
-    `${reason}（超过 ${Math.round(JOB_STALE_TIMEOUT_MS / 1000)} 秒），已自动释放任务锁；已经采集的数据仍保留，请重新开始。`
+    `${reason}（超过 ${Math.round(JOB_STALE_TIMEOUT_MS / 1000)} 秒），已自动释放该任务的采集资源；已经采集的数据仍保留，请重新开始。`
   );
 }
 
@@ -905,6 +913,7 @@ function downloadFileName(settings, count, type, mode) {
 function runExport(items, settings, context = {}) {
   const task = async () => {
     await ensureOffscreenDocument();
+    const normalizedSettings = normalizeSettings(settings);
     const exportType = context.type || 'search';
     const exportCount = exportType === 'store'
       ? (Array.isArray(context.storeProfiles) ? context.storeProfiles.length : 0)
@@ -921,11 +930,11 @@ function runExport(items, settings, context = {}) {
       items: Array.isArray(items) ? items : [],
       storeProfiles: Array.isArray(context.storeProfiles) ? context.storeProfiles : [],
       exportKind: exportType === 'store' ? 'store' : 'product',
-      settings: normalizeSettings(settings),
+      settings: normalizedSettings,
       fieldConfig: {
-        product: normalizeSettings(settings).productFields,
-        storeProfile: normalizeSettings(settings).storeProfileFields,
-        storeReview: normalizeSettings(settings).storeReviewFields
+        product: normalizedSettings.productFields,
+        storeProfile: normalizedSettings.storeProfileFields,
+        storeReview: normalizedSettings.storeReviewFields
       },
       filename
     });
@@ -1157,35 +1166,6 @@ async function readStableAccountProfile(tabId, options = {}) {
   throw lastError || new Error('卖家账号页资料尚未稳定加载，未写入商品字段。');
 }
 
-async function mergeStoredItemWithProfile(identity, profile) {
-  const items = await readItems();
-  const key = itemKey(identity || {});
-  const existing = items.find(item => itemKey(item) === key);
-  if (!existing || !profile) return false;
-
-  const patch = { ...existing };
-  for (const field of [
-    'sellerName', 'sellerUrl', 'sellerLocation', 'sellerFollowers', 'sellerFollowing',
-    'sellerProductCount', 'sellerIntro', 'sellerReviewSummary', 'sellerReviewCount'
-  ]) {
-    if (profile[field]) patch[field] = profile[field];
-  }
-  const profileGoodRate = rateText(profile.sellerGoodRate || '');
-  if (profileGoodRate && !rateText(patch.itemGoodRate || '')) {
-    // 详情页的 reviewSummary 可能是一段文案，但这不应阻止账号页的明确百分比
-    // 写入“商品好评率”；判断依据必须是目标字段是否已有合法百分比，而不是摘要是否为空。
-    patch.itemGoodRate = profileGoodRate;
-    if (!patch.reviewSummary || !rateText(patch.reviewSummary)) patch.reviewSummary = profileGoodRate;
-  }
-  if (Array.isArray(profile.reviewSamples) && profile.reviewSamples.length) {
-    patch.reviewSamples = profile.reviewSamples;
-  }
-  patch.dataSource = [existing.dataSource, 'account-dom'].filter(Boolean).join(',');
-  const merged = mergeItems(items, [patch]);
-  await writeItems(merged);
-  return true;
-}
-
 function applyProfileToItem(item, profile) {
   const base = sanitizeItem(item || {});
   if (!base || !profile) return base;
@@ -1412,7 +1392,6 @@ async function scheduleJob(job, status, delayMs = 1000) {
   await writeJob(next);
   if (!(await canContinueJob(next))) return readJob(next.id);
   await Promise.resolve(chrome.alarms.clear(jobAlarmName(next.id))).catch(() => {});
-  await Promise.resolve(chrome.alarms.clear(JOB_ALARM)).catch(() => {});
   if (!(await canContinueJob(next))) return readJob(next.id);
   chrome.alarms.create(jobAlarmName(next.id), {
     when: Date.now() + Math.max(250, Number(delayMs) || 1000)
@@ -2066,9 +2045,6 @@ async function processJobAlarm(alarmName = JOB_ALARM) {
 }
 
 async function startLinksJob(links, delayMs = 1500, mode = 'rpa') {
-  const current = await readJob();
-  if (jobIsActive(current)) await recoverStaleJob(current);
-
   const settings = await readSettings();
   const tab = await tabsCreate({ url: links[0], active: false });
   const job = {
@@ -2147,9 +2123,6 @@ async function startStoreProductsJob(storeUrl, delayMs = 1800, mode = 'rpa') {
 }
 
 async function startSearchJob(startUrl, targetCount, maxPages, delayMs = 1800, mode = 'rpa') {
-  const current = await readJob();
-  if (jobIsActive(current)) await recoverStaleJob(current);
-
   let parsedStart;
   try {
     parsedStart = new URL(startUrl);
@@ -2307,7 +2280,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           activeJob
           && jobIsActive(activeJob)
           && activeJob.tabId === sender?.tab?.id
-          && ['links', 'search'].includes(activeJob.type)
+          && ['links', 'search', 'store-products'].includes(activeJob.type)
         );
 
         // 详情页单采和批量任务默认只写入“本次结果暂存区”。这样用户可以先检查结果，
