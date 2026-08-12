@@ -34,6 +34,8 @@
   let currentStoreCommitted = false;
   let dataTab = 'products';
   let currentTaskJob = null;
+  let taskJobs = [];
+  let selectedTaskId = '';
 
   const SCREEN_META = {
     home: { kicker: 'WORKSPACE', title: '闲鱼研究助手', subtitle: '从公开详情页整理同行商品与店铺信息' },
@@ -41,9 +43,10 @@
     store: { kicker: 'CURRENT STORE', title: '采集当前店铺页', subtitle: '分别读取店铺资料与店铺评价图片' },
     links: { kicker: 'BATCH INPUT', title: '批量商品链接', subtitle: '自动逐个打开商品详情页' },
     search: { kicker: 'SEARCH CRAWL', title: '搜索跨页采集', subtitle: '按页码推进，并逐个进入详情页' },
-    data: { kicker: 'LOCAL DATASET', title: '数据中心', subtitle: '查看记录、下载 Excel 和图片索引' },
+    data: { kicker: 'LOCAL DATASET', title: '数据中心', subtitle: '查看记录、下载 Excel 和真实图片' },
     history: { kicker: 'TASK ARCHIVE', title: '采集历史', subtitle: '查看任务结果，重新导出或删除' },
     settings: { kicker: 'WORKSPACE SETTINGS', title: '下载与字段设置', subtitle: '控制下载方式、图片和卖家公开资料' },
+    tasks: { kicker: 'TASK CENTER', title: '任务中心', subtitle: '查看多个任务的状态和结果' },
     task: { kicker: 'TASK RUNNER', title: '处理任务', subtitle: '查看逐个详情页的采集进度' }
   };
 
@@ -59,7 +62,11 @@
     if (push && currentScreen !== target) {
       // 一级功能页统一回首页，只有“任务 → 数据中心”保留一个明确的返回关系。
       // 不再累积历史栈，避免设置页、详情页之间来回跳转。
-      screenParent = parent || (target === 'data' && currentScreen === 'task' ? 'task' : 'home');
+      screenParent = parent || (target === 'data' && currentScreen === 'task'
+        ? 'task'
+        : target === 'task' && currentScreen === 'tasks'
+          ? 'tasks'
+          : 'home');
     }
     currentScreen = target;
     document.querySelectorAll('[data-screen]').forEach(screen => {
@@ -442,7 +449,24 @@
   }
 
   function jobIsActive(job) {
-    return Boolean(job && !['completed', 'partial', 'stopped', 'failed'].includes(job.status));
+    return Boolean(job && !['completed', 'partial', 'stopped', 'failed', 'paused'].includes(job.status));
+  }
+
+  function jobStatusText(job) {
+    if (!job) return '未开始';
+    if (job.status === 'paused') return '已暂停';
+    if (job.status === 'completed') return '已完成';
+    if (job.status === 'partial') return '部分完成';
+    if (job.status === 'stopped') return '已停止';
+    if (job.status === 'failed') return '失败';
+    return '正在处理';
+  }
+
+  function jobTypeText(job) {
+    if (job?.type === 'links') return `批量商品 · ${job.links?.length || 0} 条`;
+    if (job?.type === 'search') return `搜索跨页 · ${job.targetCount || 0} 条`;
+    if (job?.type === 'store-products') return `店铺全部商品 · ${job.targetCount || job.links?.length || '全部'}`;
+    return '采集任务';
   }
 
   function jobProgress(job) {
@@ -451,7 +475,7 @@
       const total = Math.max(1, job.links?.length || 0);
       return Math.min(100, Math.round((Number(job.index || 0) / total) * 100));
     }
-    const total = Math.max(1, Number(job.targetCount || 0));
+    const total = Math.max(1, Number(job.targetCount || job.links?.length || 0));
     return Math.min(100, Math.round((Number(job.visited || 0) / total) * 100));
   }
 
@@ -526,16 +550,21 @@
       return;
     }
 
-    const typeText = job.type === 'links' ? '链接批量' : '搜索跨页';
-    const stateText = active ? '正在处理' : job.status === 'completed' ? '处理完成' : job.status === 'partial' ? '部分完成' : job.status === 'stopped' ? '已停止' : '处理失败';
+    const typeText = job.type === 'links' ? '链接批量' : job.type === 'store-products' ? '店铺全部商品' : '搜索跨页';
+    const stateText = jobStatusText(job);
     const percent = jobProgress(job);
     $('jobBadge').textContent = `${typeText} · ${job.mode === 'api' ? 'API 模式' : '详情模式'}`;
     $('jobHeadline').textContent = stateText;
     $('jobProgressText').textContent = `${percent}%`;
     $('progressRing').style.setProperty('--progress', `${percent}%`);
     $('progressRing').style.setProperty('--ring-color', job.status === 'completed' ? 'var(--green)' : job.status === 'partial' ? '#d39b32' : job.status === 'failed' ? 'var(--danger)' : 'var(--blue)');
-    $('stopJobButton').disabled = !active;
-    $('stopJobButton').textContent = active ? '停止任务' : '任务已结束';
+    $('stopJobButton').disabled = !active && job.status !== 'paused';
+    $('stopJobButton').textContent = active || job.status === 'paused' ? '停止任务' : '任务已结束';
+    const pauseButton = $('taskPauseButton');
+    if (pauseButton) {
+      pauseButton.disabled = !active && job.status !== 'paused';
+      pauseButton.textContent = job.status === 'paused' ? '继续任务' : '暂停任务';
+    }
     const stagedCount = Array.isArray(job.stagedItems) ? job.stagedItems.length : Number(job.collected || 0);
     const hasStagedItems = stagedCount > 0;
     $('taskExportButton').disabled = active || !hasStagedItems;
@@ -550,14 +579,16 @@
 
     const progress = job.type === 'links'
       ? `详情链接 ${Math.min(Number(job.index || 0), job.links?.length || 0)}/${job.links?.length || 0}，成功 ${job.collected || 0} 条`
-      : `详情页 ${job.visited || 0}/${job.targetCount || 0}，成功 ${job.collected || 0} 条，搜索页 ${job.pagesProcessed || 0}/${job.maxPages || 0}`;
+      : job.type === 'store-products'
+        ? `店铺商品详情 ${job.visited || 0}/${job.targetCount || job.links?.length || '全部'}，成功 ${job.collected || 0} 条`
+        : `详情页 ${job.visited || 0}/${job.targetCount || 0}，成功 ${job.collected || 0} 条，搜索页 ${job.pagesProcessed || 0}/${job.maxPages || 0}`;
     const failures = job.failures?.length ? `，失败 ${job.failures.length} 个` : '';
     const sellerFailures = job.sellerFailures?.length ? `，店铺资料失败 ${job.sellerFailures.length} 个` : '';
     const qualityWarnings = job.qualityWarnings?.length ? `，字段待补充 ${job.qualityWarnings.length} 个` : '';
     $('jobStatus').textContent = `${job.message || '任务处理中'}（${progress}${failures}${sellerFailures}${qualityWarnings}）`;
     $('taskCountText').textContent = progress;
     $('taskModeText').textContent = job.mode === 'api' ? 'API 模式' : '页面详情模式';
-    $('taskTypeText').textContent = job.type === 'links' ? `商品详情 · ${job.links?.length || 0} 个` : `搜索详情 · ${job.targetCount || 0} 条`;
+    $('taskTypeText').textContent = jobTypeText(job);
     $('taskCreatedText').textContent = formatDate(job.createdAt);
     $('taskStateText').textContent = stateText;
     renderTaskFailures(job);
@@ -569,7 +600,7 @@
 
     const isNewJob = job.id && job.id !== lastJobId;
     lastJobId = job.id || '';
-    if (active && currentScreen !== 'task' && isNewJob) showScreen('task');
+    if (active && currentScreen === 'home' && isNewJob) showScreen('task', true, 'tasks');
 
     const terminalKey = `${job.id}:${job.status}:${job.updatedAt}:${job.autoExportStatus || ''}:${job.committedToDataCenter ? 'committed' : ''}`;
     if (!active && terminalKey !== lastTerminalKey) {
@@ -582,9 +613,110 @@
   }
 
   async function refreshJob() {
-    const response = await sendRuntime({ type: 'GET_JOB_STATUS' });
+    const response = await sendRuntime({ type: 'GET_JOB_STATUS', jobId: selectedTaskId || undefined });
     if (!response?.ok) throw new Error(response?.error || '读取任务状态失败');
     renderJob(response.job);
+  }
+
+  function renderTaskCenter() {
+    const list = $('tasksList');
+    const count = $('taskCenterCount');
+    if (!list || !count) return;
+    count.textContent = String(taskJobs.length);
+    list.replaceChildren();
+    if (!taskJobs.length) {
+      const empty = document.createElement('p');
+      empty.className = 'empty-state';
+      empty.textContent = '还没有任务记录。开始一次商品或店铺采集后，任务会一直保留在这里。';
+      list.append(empty);
+      return;
+    }
+
+    for (const job of taskJobs) {
+      const card = document.createElement('article');
+      card.className = `task-center-card status-${job.status || 'unknown'}`;
+      const head = document.createElement('div');
+      head.className = 'task-center-card-head';
+      const title = document.createElement('div');
+      title.className = 'task-center-card-title';
+      const kicker = document.createElement('span');
+      kicker.className = 'task-label';
+      kicker.textContent = job.mode === 'api' ? 'API MODE' : 'DETAIL MODE';
+      const name = document.createElement('strong');
+      name.textContent = jobTypeText(job);
+      title.append(kicker, name);
+      const badge = document.createElement('span');
+      badge.className = 'task-status-badge';
+      badge.textContent = jobStatusText(job);
+      head.append(title, badge);
+
+      const progress = document.createElement('div');
+      progress.className = 'task-center-progress';
+      const progressBar = document.createElement('span');
+      progressBar.style.width = `${jobProgress(job)}%`;
+      progress.append(progressBar);
+      const summary = document.createElement('p');
+      summary.className = 'task-center-summary';
+      summary.textContent = job.type === 'links'
+        ? `详情页 ${Math.min(Number(job.index || 0), job.links?.length || 0)}/${job.links?.length || 0} · 成功 ${job.collected || 0} 条`
+        : `详情页 ${job.visited || 0}/${job.targetCount || job.links?.length || '全部'} · 成功 ${job.collected || 0} 条`;
+      const meta = document.createElement('small');
+      meta.textContent = `${formatDate(job.updatedAt || job.createdAt)} · ${job.message || ''}`;
+
+      const actions = document.createElement('div');
+      actions.className = 'task-center-actions';
+      const view = document.createElement('button');
+      view.className = 'button small outline-action';
+      view.type = 'button';
+      view.textContent = '查看详情';
+      view.addEventListener('click', () => {
+        selectedTaskId = job.id;
+        showScreen('task', true, 'tasks');
+        void refreshJob().catch(error => setStatus(error.message, 'error'));
+      });
+      actions.append(view);
+      if (jobIsActive(job) || job.status === 'paused') {
+        const toggle = document.createElement('button');
+        toggle.className = 'button small outline-action';
+        toggle.type = 'button';
+        toggle.textContent = job.status === 'paused' ? '继续' : '暂停';
+        toggle.addEventListener('click', () => toggleTask(job).catch(error => setStatus(error.message, 'error')));
+        actions.append(toggle);
+      }
+      if (!jobIsActive(job) && (job.stagedItems?.length || job.collected)) {
+        const exportButton = document.createElement('button');
+        exportButton.className = 'button small primary';
+        exportButton.type = 'button';
+        exportButton.textContent = '导出';
+        exportButton.addEventListener('click', () => {
+          selectedTaskId = job.id;
+          void exportTaskResult().catch(error => setStatus(error.message, 'error'));
+        });
+        actions.append(exportButton);
+      }
+      card.append(head, progress, summary, meta, actions);
+      list.append(card);
+    }
+  }
+
+  async function refreshTasks() {
+    const response = await sendRuntime({ type: 'GET_JOBS' });
+    if (!response?.ok) throw new Error(response?.error || '读取任务中心失败');
+    taskJobs = Array.isArray(response.jobs) ? response.jobs : [];
+    if (selectedTaskId && !taskJobs.some(job => job.id === selectedTaskId)) selectedTaskId = '';
+    renderTaskCenter();
+    if (!selectedTaskId && currentTaskJob?.id && taskJobs.some(job => job.id === currentTaskJob.id)) {
+      selectedTaskId = currentTaskJob.id;
+    }
+  }
+
+  async function toggleTask(job) {
+    const type = job.status === 'paused' ? 'RESUME_JOB' : 'PAUSE_JOB';
+    const response = await sendRuntime({ type, jobId: job.id });
+    if (!response?.ok) throw new Error(response?.error || '更新任务状态失败');
+    selectedTaskId = job.id;
+    await Promise.all([refreshTasks(), refreshJob()]);
+    setStatus(response.job?.status === 'paused' ? '任务已暂停；可以继续使用其他采集功能。' : '任务已继续。', 'success');
   }
 
   async function collectCurrentPage() {
@@ -898,7 +1030,8 @@
       if (!response?.ok) throw new Error(response?.error || '启动链接批量采集失败');
       $('linkInput').value = '';
       setStatus(`已启动 ${links.length} 个链接的自动详情采集。`, 'success');
-      showScreen('task');
+      selectedTaskId = response.job?.id || '';
+      showScreen('task', true, 'tasks');
       await refreshJob();
     } catch (error) {
       setStatus(error.message || '启动批量采集失败。', 'error');
@@ -928,7 +1061,8 @@
       });
       if (!response?.ok) throw new Error(response?.error || '启动搜索跨页采集失败');
       setStatus(`已启动自动跨页采集：目标 ${targetCount} 条，最多 ${maxPages} 页。`, 'success');
-      showScreen('task');
+      selectedTaskId = response.job?.id || '';
+      showScreen('task', true, 'tasks');
       await refreshJob();
     } catch (error) {
       setStatus(error.message || '启动跨页采集失败。', 'error');
@@ -944,10 +1078,10 @@
     }
     setStatus('正在停止采集并关闭专用标签页…');
     try {
-      const response = await sendRuntime({ type: 'STOP_JOB' });
+      const response = await sendRuntime({ type: 'STOP_JOB', jobId: currentTaskJob?.id || selectedTaskId || undefined });
       if (!response?.ok) throw new Error(response?.error || '停止任务失败');
       setStatus('任务已停止，采集专用标签页已关闭；已经采集的数据仍保留在本机。', 'success');
-      await refreshJob();
+      await Promise.all([refreshJob(), refreshTasks()]);
     } catch (error) {
       setStatus(error.message || '停止任务失败。', 'error');
       await refreshJob().catch(() => {});
@@ -1220,6 +1354,10 @@
     $('batchLinkButton').addEventListener('click', () => startLinkBatch());
     $('searchCrawlButton').addEventListener('click', () => startSearchCrawl());
     $('stopJobButton').addEventListener('click', () => stopJob());
+    $('taskPauseButton')?.addEventListener('click', () => {
+      if (currentTaskJob) toggleTask(currentTaskJob).catch(error => setStatus(error.message, 'error'));
+    });
+    $('refreshTasksButton')?.addEventListener('click', () => refreshTasks().catch(error => setStatus(error.message, 'error')));
     $('copyFailedLinksButton')?.addEventListener('click', () => copyFailedLinks().catch(error => setStatus(error.message, 'error')));
     $('exportButton').addEventListener('click', () => exportItems($('exportButton')).catch(error => setStatus(error.message, 'error')));
     $('storeDataExportButton').addEventListener('click', () => exportItems($('storeDataExportButton')).catch(error => setStatus(error.message, 'error')));
@@ -1256,13 +1394,14 @@
     updateScreenChrome('home');
     try {
       await loadSettings();
-      await Promise.all([refreshCurrentPage(), refreshCount(), refreshHistory(), refreshJob()]);
+      await Promise.all([refreshCurrentPage(), refreshCount(), refreshHistory(), refreshTasks(), refreshJob()]);
     } catch (error) {
       setStatus(error.message || '插件初始化失败，请刷新侧边栏重试。', 'error');
     }
 
     const pollTimer = setInterval(() => {
       void refreshJob().catch(() => {});
+      void refreshTasks().catch(() => {});
       void refreshCount().catch(() => {});
     }, 1000);
     window.addEventListener('unload', () => clearInterval(pollTimer), { once: true });

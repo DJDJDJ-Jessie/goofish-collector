@@ -98,9 +98,9 @@
                 <span class="row-copy"><strong>采集历史</strong><small>查看任务结果，重新导出或删除</small></span>
                 <span class="row-chevron">›</span>
               </button>
-              <button class="menu-row" type="button" data-open-screen="task">
+              <button class="menu-row" type="button" data-open-screen="tasks">
                 <span class="row-icon teal">◌</span>
-                <span class="row-copy"><strong>任务状态</strong><small id="homeTaskHint">查看当前任务进度和完成结果</small></span>
+                <span class="row-copy"><strong>任务中心</strong><small id="homeTaskHint">查看进行中、已暂停和已完成的任务</small></span>
                 <span class="row-chevron">›</span>
               </button>
               <button class="menu-row" type="button" data-open-screen="settings">
@@ -160,7 +160,7 @@
             <button id="diagnosticButton" class="button tertiary" type="button">一键导出页面诊断包</button>
           </section>
 
-          <p class="helper note-helper">采集结果只保存公开商品信息。真实图片会在导出 Excel 时下载并嵌入，同时生成图片索引表。</p>
+          <p class="helper note-helper">采集结果只保存公开商品信息。真实图片会在导出 Excel 时下载并嵌入商品主表；商品图片不再单独生成索引表。</p>
         </section>
 
         <section id="screen-store" class="screen" data-screen="store" aria-labelledby="screenTitle">
@@ -237,12 +237,12 @@ https://www.goofish.com/item?id=…"></textarea>
           <section id="dataProductsPanel" class="data-panel" role="tabpanel">
             <section class="data-summary-card">
               <div><span>商品主表</span><strong id="itemCount">0</strong></div>
-              <div><span>图片索引</span><strong class="accent-text">逐张嵌入</strong></div>
+              <div><span>商品图片</span><strong class="accent-text">全部嵌入主表</strong></div>
               <div><span>店铺资料</span><strong>商品表不混入</strong></div>
             </section>
             <section class="action-card data-actions-card">
               <button id="exportButton" class="button primary large" type="button">下载商品表 Excel</button>
-              <p class="helper">包含商品详情、主图和全部商品图片索引；店铺评价请切换到店铺表。</p>
+              <p class="helper">包含商品详情和全部商品图片；多张图片会按“商品图片、商品图片2、商品图片3…”放在同一张商品表中。</p>
             </section>
           </section>
           <section id="dataStoresPanel" class="data-panel is-hidden" role="tabpanel">
@@ -260,6 +260,19 @@ https://www.goofish.com/item?id=…"></textarea>
             <button id="clearButton" class="button danger-outline" type="button">清空当前数据</button>
             <p id="exportHint" class="helper">清空会同时清空本地商品表和店铺表，但不会删除采集历史。</p>
           </section>
+        </section>
+
+        <section id="screen-tasks" class="screen" data-screen="tasks" aria-labelledby="screenTitle">
+          <section class="page-intro">
+            <span class="intro-label">TASK CENTER</span>
+            <h2>任务中心</h2>
+            <p>每次采集都会保留为独立任务；可以同时运行多个任务，返回后继续查看进度、暂停或导出。</p>
+          </section>
+          <section class="task-center-toolbar">
+            <div><strong id="taskCenterCount">0</strong><span>个任务</span></div>
+            <button id="refreshTasksButton" class="button small outline-action" type="button">刷新状态</button>
+          </section>
+          <div id="tasksList" class="tasks-list"><p class="empty-state">还没有任务记录。</p></div>
         </section>
 
         <section id="screen-history" class="screen" data-screen="history" aria-labelledby="screenTitle">
@@ -343,6 +356,7 @@ https://www.goofish.com/item?id=…"></textarea>
             </section>
 
             <div class="task-actions">
+              <button id="taskPauseButton" class="button outline-action" type="button" disabled>暂停任务</button>
               <button id="stopJobButton" class="button outline-action" type="button" disabled>停止任务</button>
               <button id="taskCommitButton" class="button teal-action large" type="button" disabled>加到数据中心商品表</button>
               <button id="taskExportButton" class="button primary large" type="button" disabled>导出本次商品数据</button>
@@ -355,6 +369,7 @@ https://www.goofish.com/item?id=…"></textarea>
       <p id="status" class="status" role="status" aria-live="polite">准备就绪</p>
     </main>
     <script src="diagnostic.js"></script>
+    <script src="field-config.js"></script>
     <script src="sidepanel.js"></script>
   </body>
 </html>

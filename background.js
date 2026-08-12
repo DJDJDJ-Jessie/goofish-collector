@@ -3,7 +3,9 @@
 const STORAGE_KEY = 'xianyu_public_items_v1';
 const STORE_PROFILES_KEY = 'xianyu_public_store_profiles_v1';
 const JOB_KEY = 'xianyu_collect_job_v1';
+const JOBS_KEY = 'xianyu_collect_jobs_v2';
 const JOB_ALARM = 'xianyu_collect_job_alarm_v1';
+const JOB_ALARM_PREFIX = 'xianyu_collect_job_alarm_v2:';
 const SETTINGS_KEY = 'xianyu_collect_settings_v1';
 const HISTORY_KEY = 'xianyu_collect_history_v1';
 const OFFSCREEN_PATH = 'offscreen.html';
@@ -13,6 +15,7 @@ const MAX_STORE_REVIEWS = 1000;
 const MAX_HISTORY = 50;
 const TAB_MESSAGE_TIMEOUT_MS = 12000;
 const JOB_STALE_TIMEOUT_MS = 90000;
+const MAX_TASKS = 100;
 const cancelledJobIds = new Set();
 
 function markJobCancelled(jobId) {
@@ -475,19 +478,89 @@ async function recordHistory(job, extra = {}) {
   }
 }
 
-async function readJob() {
-  const result = await chrome.storage.local.get(JOB_KEY);
-  return result[JOB_KEY] || null;
-}
-
-async function writeJob(job, options = {}) {
-  if (!options.force && isJobCancelled(job)) return readJob();
-  await chrome.storage.local.set({ [JOB_KEY]: job });
-  return job;
+function terminalJobStatus(status) {
+  return ['completed', 'partial', 'stopped', 'failed'].includes(status);
 }
 
 function jobIsActive(job) {
-  return Boolean(job && !['completed', 'partial', 'stopped', 'failed'].includes(job.status));
+  return Boolean(job && !terminalJobStatus(job.status) && job.status !== 'paused');
+}
+
+function jobIsManaged(job) {
+  return Boolean(job && !terminalJobStatus(job.status));
+}
+
+function jobAlarmName(jobId) {
+  const safeId = cleanText(jobId, 180).replace(/[^a-zA-Z0-9:_-]/g, '_');
+  return safeId ? `${JOB_ALARM_PREFIX}${safeId}` : JOB_ALARM;
+}
+
+function sortJobs(jobs) {
+  return (Array.isArray(jobs) ? jobs : [])
+    .filter(job => job && typeof job === 'object' && job.id)
+    .sort((first, second) => jobUpdatedAt(second) - jobUpdatedAt(first))
+    .slice(0, MAX_TASKS);
+}
+
+async function readJobs() {
+  let result = await chrome.storage.local.get([JOBS_KEY, JOB_KEY]);
+  // Some older Chrome test harnesses and extension shims only implement the
+  // string form of storage.get. Fall back without losing migration support.
+  if (!result || (!Object.prototype.hasOwnProperty.call(result, JOBS_KEY)
+    && !Object.prototype.hasOwnProperty.call(result, JOB_KEY))) {
+    const legacyResult = await chrome.storage.local.get(JOB_KEY);
+    result = { ...(legacyResult || {}) };
+  }
+  const stored = Array.isArray(result[JOBS_KEY]) ? result[JOBS_KEY] : [];
+  const legacy = result[JOB_KEY];
+  const merged = [...stored];
+  if (legacy?.id && !merged.some(job => job.id === legacy.id)) merged.push(legacy);
+  return sortJobs(merged);
+}
+
+function primaryJob(jobs) {
+  const list = sortJobs(jobs);
+  return list.find(jobIsActive) || list[0] || null;
+}
+
+async function readJob(jobId = '') {
+  const jobs = await readJobs();
+  if (jobId) return jobs.find(job => job.id === jobId) || null;
+  return primaryJob(jobs);
+}
+
+async function writeJobs(jobs) {
+  const normalized = sortJobs(jobs);
+  const primary = primaryJob(normalized);
+  await chrome.storage.local.set({
+    [JOBS_KEY]: normalized,
+    // Keep the old key during the migration so an interrupted extension update
+    // can still recover the most recent task.
+    [JOB_KEY]: primary
+  });
+  return normalized;
+}
+
+async function writeJob(job, options = {}) {
+  if (!job?.id) return readJob();
+  if (!options.force && isJobCancelled(job)) return readJob(job.id);
+  const jobs = await readJobs();
+  const next = jobs.filter(candidate => candidate.id !== job.id);
+  next.push(job);
+  await writeJobs(next);
+  return job;
+}
+
+async function findJobByTabId(tabId, options = {}) {
+  const jobs = await readJobs();
+  return jobs.find(job => Number(job.tabId) === Number(tabId) && (options.managed ? jobIsManaged(job) : jobIsActive(job))) || null;
+}
+
+async function clearJobAlarm(jobId) {
+  await Promise.resolve(chrome.alarms.clear(jobAlarmName(jobId))).catch(() => {});
+  // Clear the legacy singleton alarm as well; it is only used by versions
+  // before the task-center migration.
+  await Promise.resolve(chrome.alarms.clear(JOB_ALARM)).catch(() => {});
 }
 
 function jobFailureRecords(job) {
@@ -575,7 +648,7 @@ function terminalStatus(status, job) {
 
 async function canContinueJob(job) {
   if (!job?.id || isJobCancelled(job)) return false;
-  const current = await readJob();
+  const current = await readJob(job.id);
   return Boolean(current && current.id === job.id && jobIsActive(current));
 }
 
@@ -1300,13 +1373,14 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
 }
 
 async function scheduleJob(job, status, delayMs = 1000) {
-  if (!(await canContinueJob(job))) return readJob();
+  if (!(await canContinueJob(job))) return readJob(job?.id);
   const next = jobMessage({ ...job, status }, job.message || '等待下一步');
   await writeJob(next);
-  if (!(await canContinueJob(next))) return readJob();
-  await chrome.alarms.clear(JOB_ALARM);
-  if (!(await canContinueJob(next))) return readJob();
-  chrome.alarms.create(JOB_ALARM, {
+  if (!(await canContinueJob(next))) return readJob(next.id);
+  await Promise.resolve(chrome.alarms.clear(jobAlarmName(next.id))).catch(() => {});
+  await Promise.resolve(chrome.alarms.clear(JOB_ALARM)).catch(() => {});
+  if (!(await canContinueJob(next))) return readJob(next.id);
+  chrome.alarms.create(jobAlarmName(next.id), {
     when: Date.now() + Math.max(250, Number(delayMs) || 1000)
   });
   return next;
@@ -1339,17 +1413,19 @@ async function notifyJobFinished(job, exportResult = null) {
 
 async function finishJob(job, status, message, options = {}) {
   const force = Boolean(options.force);
-  if (!force && isJobCancelled(job)) return readJob();
-  await chrome.alarms.clear(JOB_ALARM);
-  const current = await readJob();
-  if (!current || current.id !== job?.id || !jobIsActive(current) || (!force && isJobCancelled(job))) {
+  if (!force && isJobCancelled(job)) return readJob(job?.id);
+  await clearJobAlarm(job?.id);
+  const current = await readJob(job?.id);
+  if (!current || current.id !== job?.id
+    || (!jobIsActive(current) && !(force && current.status === 'paused'))
+    || (!force && isJobCancelled(job))) {
     return current || job;
   }
   const effectiveStatus = terminalStatus(status, force ? current : job);
   const finalJob = jobMessage({ ...(force ? current : job), status: effectiveStatus }, message);
   const persistedJob = await writeJob(finalJob, { force });
   if (!force && (isJobCancelled(job) || persistedJob?.id !== job.id || persistedJob?.status !== effectiveStatus)) {
-    return persistedJob || await readJob();
+    return persistedJob || await readJob(job.id);
   }
 
   if (status === 'stopped' && options.closeTaskTab && Number.isInteger(Number(finalJob.tabId))) {
@@ -1885,10 +1961,13 @@ async function processAccountPage(job) {
   }
 }
 
-async function processJobAlarm() {
-  const rawJob = await readJob();
+async function processJobAlarm(alarmName = JOB_ALARM) {
+  const jobId = String(alarmName || '').startsWith(JOB_ALARM_PREFIX)
+    ? String(alarmName).slice(JOB_ALARM_PREFIX.length)
+    : '';
+  const rawJob = await readJob(jobId);
   if (!rawJob || !jobIsActive(rawJob) || rawJob.status !== 'ready-to-collect') return;
-  if (!(await canContinueJob(rawJob))) return readJob();
+  if (!(await canContinueJob(rawJob))) return readJob(rawJob.id);
 
   const job = normalizeSearchJob(rawJob);
   const collectingMessage = job.stage === 'account-page'
@@ -1898,7 +1977,7 @@ async function processJobAlarm() {
       : '正在采集当前商品详情页…';
   const collecting = { ...job, status: 'collecting' };
   await writeJob(jobMessage(collecting, collectingMessage));
-  if (!(await canContinueJob(collecting))) return readJob();
+  if (!(await canContinueJob(collecting))) return readJob(collecting.id);
   if (job.stage === 'account-page') await processAccountPage(collecting);
   else if (job.type === 'links') await processLinkJob(collecting);
   else if (job.type === 'search' && job.stage === 'detail-page') await processSearchDetail(collecting);
@@ -1906,13 +1985,13 @@ async function processJobAlarm() {
 }
 
 async function startLinksJob(links, delayMs = 1500, mode = 'rpa') {
-  const current = await recoverStaleJob(await readJob());
-  if (jobIsActive(current)) throw new Error('已有采集任务正在运行，请先停止当前任务。');
+  const current = await readJob();
+  if (jobIsActive(current)) await recoverStaleJob(current);
 
   const settings = await readSettings();
   const tab = await tabsCreate({ url: links[0], active: false });
   const job = {
-    id: `links-${Date.now()}`,
+    id: `links-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     type: 'links',
     mode: mode === 'api' ? 'api' : 'rpa',
     status: 'waiting-page',
@@ -1941,8 +2020,8 @@ async function startLinksJob(links, delayMs = 1500, mode = 'rpa') {
 }
 
 async function startSearchJob(startUrl, targetCount, maxPages, delayMs = 1800, mode = 'rpa') {
-  const current = await recoverStaleJob(await readJob());
-  if (jobIsActive(current)) throw new Error('已有采集任务正在运行，请先停止当前任务。');
+  const current = await readJob();
+  if (jobIsActive(current)) await recoverStaleJob(current);
 
   let parsedStart;
   try {
@@ -1957,7 +2036,7 @@ async function startSearchJob(startUrl, targetCount, maxPages, delayMs = 1800, m
   const settings = await readSettings();
   const tab = await tabsCreate({ url: startUrl, active: false });
   const job = {
-    id: `search-${Date.now()}`,
+    id: `search-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     type: 'search',
     mode: mode === 'api' ? 'api' : 'rpa',
     status: 'waiting-page',
@@ -1995,6 +2074,24 @@ async function startSearchJob(startUrl, targetCount, maxPages, delayMs = 1800, m
   return scheduleJob(job, 'ready-to-collect', 1800);
 }
 
+async function restoreActiveJobs() {
+  const jobs = await readJobs();
+  for (const job of jobs) {
+    if (!jobIsActive(job)) continue;
+    await recoverStaleJob(job).catch(() => {});
+    const current = await readJob(job.id);
+    if (!jobIsActive(current)) continue;
+    // A service-worker restart can lose one-shot alarms. Re-queue every
+    // runnable task independently so returning to the side panel never hides
+    // a task or leaves it permanently stuck.
+    if (current.status === 'ready-to-collect') {
+      await scheduleJob(current, current.status, 450).catch(() => {});
+    } else if (current.status === 'waiting-page') {
+      await scheduleJob(current, 'ready-to-collect', 900).catch(() => {});
+    }
+  }
+}
+
 async function configureSidePanel() {
   if (!chrome.sidePanel?.setPanelBehavior) return;
   await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -2006,10 +2103,12 @@ chrome.runtime.onInstalled.addListener(async () => {
   const settingsResult = await chrome.storage.local.get(SETTINGS_KEY);
   if (!settingsResult[SETTINGS_KEY]) await writeSettings(DEFAULT_SETTINGS);
   await configureSidePanel();
+  await restoreActiveJobs();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   void configureSidePanel();
+  void restoreActiveJobs();
 });
 
 chrome.action.onClicked.addListener(tab => {
@@ -2020,7 +2119,7 @@ chrome.action.onClicked.addListener(tab => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status !== 'complete') return;
   void (async () => {
-    const job = await readJob();
+    const job = await findJobByTabId(tabId);
     if (!job || job.tabId !== tabId || !jobIsActive(job)) return;
     if (job.status === 'waiting-page') {
       await scheduleJob(job, 'ready-to-collect', job.type === 'links' ? 1000 : 1500);
@@ -2030,14 +2129,16 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
 chrome.tabs.onRemoved.addListener(tabId => {
   void (async () => {
-    const job = await readJob();
-    if (!job || job.tabId !== tabId || !jobIsActive(job)) return;
+    const job = await findJobByTabId(tabId, { managed: true });
+    if (!job || job.tabId !== tabId || !jobIsManaged(job)) return;
     await finishJob(job, 'stopped', '采集专用标签页被关闭，任务已停止。');
   })();
 });
 
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === JOB_ALARM) void processJobAlarm();
+  if (alarm.name === JOB_ALARM || String(alarm.name || '').startsWith(JOB_ALARM_PREFIX)) {
+    void processJobAlarm(alarm.name);
+  }
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -2047,7 +2148,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     switch (message?.type) {
       case 'COLLECT_ITEMS': {
         const pageUrl = sender?.tab?.url || message.sourcePage || '';
-        const activeJobBeforeWrite = await readJob();
+        const activeJobBeforeWrite = await findJobByTabId(sender?.tab?.id);
         if (message.pageType && message.pageType !== 'detail') {
           return {
             ok: true,
@@ -2074,7 +2175,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           .map(item => sanitizeItem({ ...item, sourcePage: item.sourcePage || pageUrl }, pageUrl))
           .filter(Boolean);
         const resultKeys = incoming.map(itemKey);
-        const activeJob = activeJobBeforeWrite || await readJob();
+        const activeJob = activeJobBeforeWrite;
         const belongsToActiveTask = Boolean(
           activeJob
           && jobIsActive(activeJob)
@@ -2156,8 +2257,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'COMMIT_JOB_RESULT': {
-        const job = await readJob();
-        if (!job || (message.jobId && job.id !== message.jobId)) {
+        const job = await readJob(message.jobId || '');
+        if (!job) {
           throw new Error('当前任务结果不存在或已经被替换。');
         }
         const incoming = Array.isArray(job.stagedItems) ? job.stagedItems : [];
@@ -2320,8 +2421,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'EXPORT_JOB_RESULT': {
-        const job = await readJob();
-        if (!job || (message.jobId && job.id !== message.jobId)) {
+        const job = await readJob(message.jobId || '');
+        if (!job) {
           throw new Error('当前任务结果不存在或已经被替换。');
         }
         const settings = await readSettings();
@@ -2362,7 +2463,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return { ok: true, count: 0 };
 
       case 'GET_JOB_STATUS':
-        return { ok: true, job: await recoverStaleJob(await readJob()) };
+        return { ok: true, job: await recoverStaleJob(await readJob(message.jobId || '')) };
+
+      case 'GET_JOBS': {
+        const jobs = [];
+        for (const job of await readJobs()) {
+          jobs.push(await recoverStaleJob(job));
+        }
+        return { ok: true, jobs: sortJobs(jobs) };
+      }
 
       case 'START_BATCH_LINKS': {
         const links = [...new Set((Array.isArray(message.links) ? message.links : [])
@@ -2385,8 +2494,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'STOP_JOB': {
-        const job = await readJob();
-        if (!job || !jobIsActive(job)) return { ok: true, job };
+        const job = await readJob(message.jobId || '');
+        if (!job || (!jobIsActive(job) && job.status !== 'paused')) return { ok: true, job };
         markJobCancelled(job.id);
         const stopped = await finishJob(
           job,
@@ -2395,6 +2504,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           { force: true, closeTaskTab: true }
         );
         return { ok: true, job: stopped };
+      }
+
+      case 'PAUSE_JOB': {
+        const job = await readJob(message.jobId || '');
+        if (!job || !jobIsActive(job)) return { ok: true, job };
+        await clearJobAlarm(job.id);
+        const paused = jobMessage({ ...job, status: 'paused' }, '任务已暂停，可在任务中心继续。');
+        await writeJob(paused, { force: true });
+        return { ok: true, job: paused };
+      }
+
+      case 'RESUME_JOB': {
+        const job = await readJob(message.jobId || '');
+        if (!job || job.status !== 'paused') return { ok: true, job };
+        const resumed = jobMessage({ ...job, status: 'ready-to-collect' }, '任务已继续，正在恢复采集…');
+        await writeJob(resumed, { force: true });
+        return { ok: true, job: await scheduleJob(resumed, 'ready-to-collect', 350) };
       }
 
       default:

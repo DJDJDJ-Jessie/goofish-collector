@@ -211,6 +211,29 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .history-actions button.delete { color: var(--danger); border-color: #efcfd0; }
 .history-actions button.delete:hover { background: var(--danger-soft); }
 .empty-state { padding: 35px 10px; margin: 15px 0 0; border: 1px dashed var(--line-strong); border-radius: 14px; color: var(--muted); background: rgba(255, 255, 255, .5); font-size: 11px; text-align: center; }
+.task-center-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; margin-top: 15px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255, 255, 255, .72); box-shadow: var(--shadow-soft); }
+.task-center-toolbar div { display: flex; align-items: baseline; gap: 5px; color: var(--muted); font-size: 11px; }
+.task-center-toolbar strong { color: var(--ink); font-size: 22px; letter-spacing: -.05em; }
+.tasks-list { display: grid; gap: 11px; margin-top: 12px; }
+.task-center-card { display: grid; gap: 9px; padding: 14px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); box-shadow: var(--shadow-soft); }
+.task-center-card.status-completed { border-color: #cdebd7; }
+.task-center-card.status-failed, .task-center-card.status-stopped { border-color: #f0d4d4; }
+.task-center-card.status-paused { border-color: #f0ddb7; background: #fffdf8; }
+.task-center-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.task-center-card-title { display: grid; gap: 5px; min-width: 0; }
+.task-center-card-title .task-label { justify-self: start; min-height: 18px; padding: 2px 7px; font-size: 8px; }
+.task-center-card-title strong { overflow: hidden; color: var(--ink); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.task-status-badge { flex: 0 0 auto; padding: 4px 8px; border-radius: 999px; color: var(--blue); background: var(--blue-soft); font-size: 10px; font-weight: 700; }
+.status-completed .task-status-badge, .status-partial .task-status-badge { color: #2b913f; background: var(--green-soft); }
+.status-failed .task-status-badge, .status-stopped .task-status-badge { color: var(--danger); background: var(--danger-soft); }
+.status-paused .task-status-badge { color: #a06e1a; background: #fff1d3; }
+.task-center-progress { height: 7px; overflow: hidden; border-radius: 999px; background: #edf0f6; }
+.task-center-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--blue), #6d84ff); transition: width .25s ease; }
+.status-completed .task-center-progress span, .status-partial .task-center-progress span { background: var(--green); }
+.task-center-summary { margin: 0; color: var(--ink-soft); font-size: 11px; font-weight: 650; }
+.task-center-card small { overflow: hidden; color: var(--muted); font-size: 9px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.task-center-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.button.small { min-height: 30px; padding: 5px 10px; border-radius: 9px; font-size: 10px; }
 
 .settings-card { padding: 0; overflow: hidden; }
 .settings-section { display: grid; gap: 11px; padding: 19px 17px; border-bottom: 1px solid var(--line); }
