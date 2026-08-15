@@ -171,10 +171,12 @@
       const parsed = new URL(sourceUrl);
       const clean = new URL(parsed.href);
       for (const key of [...clean.searchParams.keys()]) {
-        if (/resize|width|height|quality|thumbnail|thumb|process/i.test(key)) clean.searchParams.delete(key);
+        if (/resize|width|height|quality|thumbnail|thumb|process|imageview|crop|format|spm|scm|ut_sk|utsk|from|source/i.test(key)) {
+          clean.searchParams.delete(key);
+        }
       }
       if (clean.href !== parsed.href) values.push(clean.href);
-      const cleanPath = parsed.pathname.replace(/([_-])\d{2,5}x\d{2,5}(?=\.[a-z\d]{2,6}$)/i, '');
+      const cleanPath = stripImageVariant(parsed.pathname);
       if (cleanPath !== parsed.pathname) {
         const pathUrl = new URL(parsed.href);
         pathUrl.pathname = cleanPath;
@@ -186,20 +188,28 @@
     return [...new Set(values)];
   }
 
+  function stripImageVariant(pathname) {
+    let path = String(pathname || '');
+    path = path.replace(/(?:[_-]q\d+|[_-]\d{2,5}x\d{2,5}(?:q\d+)?)(?:\.[a-z\d]+_?)*$/i, '');
+    path = path.replace(/@[!_][^/]+$/i, '');
+    return path.replace(/([_-])\d{2,5}x\d{2,5}(?=\.[a-z\d]{2,8}$)/i, '');
+  }
+
   function imageDedupKey(value) {
     const raw = String(value || '').trim();
     if (!raw) return '';
     try {
       const parsed = new URL(raw);
       for (const key of [...parsed.searchParams.keys()]) {
-        if (/resize|width|height|quality|thumbnail|thumb|process|imageview|crop|format/i.test(key)) {
+        if (/resize|width|height|quality|thumbnail|thumb|process|imageview|crop|format|spm|scm|ut_sk|utsk|from|source/i.test(key)) {
           parsed.searchParams.delete(key);
         }
       }
-      parsed.pathname = parsed.pathname.replace(/([_-])\d{2,5}x\d{2,5}(?=\.[a-z\d]{2,6}$)/i, '');
+      parsed.hash = '';
+      parsed.pathname = stripImageVariant(parsed.pathname);
       return parsed.href;
     } catch (_) {
-      return raw.replace(/([_-])\d{2,5}x\d{2,5}(?=\.[a-z\d]{2,6}(?:[?#]|$))/i, '');
+      return stripImageVariant(raw);
     }
   }
 

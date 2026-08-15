@@ -110,14 +110,6 @@
               </button>
             </section>
 
-            <section class="menu-card compact-card">
-              <h2>工具与边界</h2>
-              <button class="menu-row" type="button" data-action="diagnostic">
-                <span class="row-icon orange">▣</span>
-                <span class="row-copy"><strong>导出页面诊断包</strong><small>页面识别异常时，用于分析当前页面结构</small></span>
-                <span class="row-chevron">›</span>
-              </button>
-            </section>
           </div>
 
           <div class="boundary-note">
@@ -164,7 +156,6 @@
             <button id="currentCommitButton" class="button teal-action large" type="button" disabled>加到数据中心商品表</button>
             <button id="currentExportButton" class="button outline-action large" type="button" disabled>导出当前详情页</button>
             <p id="currentCollectHint" class="helper">采集完成后可以选择：加入数据中心商品总表，或只导出当前这一条商品。</p>
-            <button id="diagnosticButton" class="button tertiary" type="button">一键导出页面诊断包</button>
           </section>
 
           <p class="helper note-helper">采集结果只保存公开商品信息。真实图片会在导出 Excel 时下载并嵌入商品主表；商品图片不再单独生成索引表。</p>
@@ -456,7 +447,6 @@ https://www.goofish.com/item?id=…"></textarea>
 
       <p id="status" class="status" role="status" aria-live="polite">准备就绪</p>
     </main>
-    <script src="diagnostic.js"></script>
     <script src="field-config.js"></script>
     <script src="sidepanel.js"></script>
   </body>

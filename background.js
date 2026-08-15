@@ -1026,7 +1026,7 @@ async function ensureContentReceiver(tabId) {
     await executeScript({
       target: { tabId },
       world: 'ISOLATED',
-      files: ['content.js']
+      files: ['image-utils.js', 'content.js']
     });
     return sendTabMessage(tabId, { type: 'GET_PAGE_INFO' });
   }

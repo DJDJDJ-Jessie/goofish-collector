@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "闲鱼公开商品研究采集器",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "自动进入闲鱼商品详情页，采集公开商品研究资料并导出包含真实图片的 Excel。",
   "permissions": [
     "storage",
@@ -48,7 +48,7 @@
         "https://goofish.com/*",
         "https://*.goofish.com/*"
       ],
-      "js": ["content.js"],
+      "js": ["image-utils.js", "content.js"],
       "run_at": "document_start",
       "world": "ISOLATED"
     }

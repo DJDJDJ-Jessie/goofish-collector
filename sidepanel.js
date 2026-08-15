@@ -340,7 +340,7 @@
     } catch (firstError) {
       try {
         await executeScript({ target: { tabId }, world: 'MAIN', files: ['main-world.js'] }).catch(() => {});
-        await executeScript({ target: { tabId }, world: 'ISOLATED', files: ['content.js'] });
+        await executeScript({ target: { tabId }, world: 'ISOLATED', files: ['image-utils.js', 'content.js'] });
         return await sendToTab(tabId, message, timeoutMs);
       } catch (secondError) {
         throw new Error(secondError?.message || firstError?.message || '无法连接当前闲鱼页面，请刷新页面后重试。');
@@ -555,7 +555,6 @@
     const controlsBusy = active && currentTaskOwnsTab;
     $('collectButton').disabled = !supported || pageType !== 'detail' || controlsBusy;
     $('storeCollectButton').disabled = !supported || pageType !== 'account' || controlsBusy;
-    $('diagnosticButton').disabled = !supported;
     $('storeProductsButton') && ($('storeProductsButton').disabled = !supported || pageType !== 'account' || controlsBusy);
     $('batchLinkButton').disabled = controlsBusy;
     $('searchCrawlButton').disabled = !supported || pageType !== 'search' || controlsBusy;
@@ -1203,112 +1202,6 @@
     }
   }
 
-  function diagnosticJson(value) {
-    return JSON.stringify(value ?? null, null, 2);
-  }
-
-  function diagnosticFilePart(value, fallback = '页面') {
-    const cleaned = String(value || fallback)
-      .replace(/[\\/:*?"<>|]+/g, '_')
-      .replace(/\s+/g, '_')
-      .replace(/_+/g, '_')
-      .replace(/^[_\.\-]+|[_\.\-]+$/g, '')
-      .slice(0, 80);
-    return cleaned || fallback;
-  }
-
-  function dataUrlToBytes(dataUrl) {
-    const base64 = String(dataUrl || '').split(',')[1] || '';
-    if (!base64 || typeof atob !== 'function') return new Uint8Array();
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-    return bytes;
-  }
-
-  function downloadBlob(blob, filename, saveAs = true) {
-    const url = URL.createObjectURL(blob);
-    return new Promise((resolve, reject) => {
-      chrome.downloads.download({ url, filename, saveAs }, id => {
-        const error = chrome.runtime.lastError;
-        if (error) reject(new Error(error.message));
-        else resolve(id);
-      });
-    }).finally(() => {
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    });
-  }
-
-  async function exportDiagnosticPackage() {
-    if (!activeTab?.id || !isGoofishUrl(activeTab.url || '')) {
-      setStatus('请先打开闲鱼详情页或搜索页，再导出诊断包。', 'error');
-      return;
-    }
-
-    const button = $('diagnosticButton');
-    button.disabled = true;
-    button.textContent = '正在提取当前页面…';
-    setStatus('正在自动提取实时 DOM、图片、链接和公开接口响应…');
-
-    try {
-      const snapshot = await sendToTabWithRecovery(activeTab.id, { type: 'GET_PAGE_SNAPSHOT' });
-      if (!snapshot?.ok) throw new Error(snapshot?.error || '页面样本提取失败');
-
-      let screenshot = '';
-      try {
-        screenshot = await chrome.tabs.captureVisibleTab(activeTab.windowId, { format: 'png' });
-      } catch (_) {
-        // 某些浏览器/窗口不允许扩展截取当前页，诊断包仍然可以正常生成。
-      }
-
-      const capturedAt = snapshot.capturedAt || new Date().toISOString();
-      const files = [
-        {
-          name: 'README.txt',
-          data: [
-            '这是由闲鱼公开商品研究采集器自动生成的页面诊断包。',
-            '包含当前动态 DOM、可见文字、链接、图片地址、当前字段解析快照和经过字段脱敏的公开接口响应。',
-            '请在上传前快速检查是否包含你不希望分享的昵称、地址或其它个人信息。',
-            `生成时间：${capturedAt}`
-          ].join('\n')
-        },
-        {
-          name: 'page-info.json',
-          data: diagnosticJson({
-            ...snapshot.page,
-            capturedAt,
-            normalizedItemCount: snapshot.normalizedItems?.length || 0,
-            networkResponseCount: snapshot.networkResponseCount || 0
-          })
-        },
-        { name: 'live-dom.html', data: snapshot.html || '' },
-        { name: 'visible-text.txt', data: snapshot.visibleText || '' },
-        { name: 'links.json', data: diagnosticJson(snapshot.links || []) },
-        { name: 'image-urls.json', data: diagnosticJson(snapshot.images || []) },
-        { name: 'normalized-items.json', data: diagnosticJson(snapshot.normalizedItems || []) },
-        { name: 'account-profile.json', data: diagnosticJson(snapshot.accountProfile || {}) },
-        { name: 'network-responses.json', data: diagnosticJson(snapshot.networkResponses || []) }
-      ];
-      if (screenshot) files.push({ name: 'screenshot.png', data: dataUrlToBytes(screenshot) });
-
-      const blob = window.XianyuDiagnostic.createZip(files);
-      const date = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const pageKind = snapshot.page?.pageType === 'detail'
-        ? '详情页'
-        : snapshot.page?.pageType === 'account' ? '账号页' : '搜索页';
-      const filename = `闲鱼研究采集/页面诊断-${diagnosticFilePart(pageKind)}-${date}.zip`;
-      await downloadBlob(blob, filename, true);
-
-      const suffix = snapshot.page?.htmlTruncated ? '（DOM 较大，已按上限截取）' : '';
-      setStatus(`页面诊断包已下载${suffix}，请直接把 ZIP 上传给我。`, 'success');
-    } catch (error) {
-      setStatus(error.message || '诊断包生成失败，请刷新闲鱼页面后重试。', 'error');
-    } finally {
-      button.disabled = false;
-      button.textContent = '一键导出页面诊断包';
-    }
-  }
-
   function parseProductLinks(value) {
     return [...new Set(String(value || '')
       .split(/[\s,]+/)
@@ -1688,10 +1581,6 @@
     document.querySelectorAll('[data-open-screen]').forEach(button => {
       button.addEventListener('click', () => showScreen(button.dataset.openScreen));
     });
-    document.querySelector('[data-action="diagnostic"]')?.addEventListener('click', () => {
-      showScreen('detail');
-      void exportDiagnosticPackage();
-    });
     $('modeRpa').addEventListener('click', () => setMode('rpa'));
     $('modeApi').addEventListener('click', () => setMode('api'));
     $('collectButton').addEventListener('click', () => collectCurrentPage());
@@ -1702,7 +1591,6 @@
     $('storeCommitButton').addEventListener('click', () => commitCurrentStore());
     $('storeExportButton').addEventListener('click', () => exportItems($('storeExportButton')).catch(error => setStatus(error.message, 'error')));
     $('storeDataButton').addEventListener('click', () => { setDataTab('stores'); showScreen('data'); });
-    $('diagnosticButton').addEventListener('click', () => exportDiagnosticPackage());
     $('batchLinkButton').addEventListener('click', () => startLinkBatch());
     $('searchCrawlButton').addEventListener('click', () => startSearchCrawl());
     $('stopJobButton').addEventListener('click', () => stopJob());

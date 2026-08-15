@@ -10,12 +10,9 @@
   const API_SNAPSHOT_EVENT = 'XIANYU_API_SNAPSHOT';
   const MAX_PAGE_ITEMS = 300;
   const MAX_NETWORK_BUFFER = 120;
-  const MAX_RAW_NETWORK_BUFFER = 8;
-  const MAX_DIAGNOSTIC_STRING = 10000;
   const RUNTIME_MESSAGE_TIMEOUT_MS = 12000;
   const pageItems = new Map();
   const networkBuffer = [];
-  const rawNetworkBuffer = [];
   let captureEnabled = false;
   // 直接详情采集和批量任务默认先暂存。后台会在任务完成后把结果交给侧边栏，
   // 只有用户明确点击“加入数据中心商品表”时才写入长期商品主表。
@@ -54,6 +51,16 @@
     } catch (_) {
       return '';
     }
+  }
+
+  function dedupeImageUrls(values) {
+    const absolute = (Array.isArray(values) ? values : [])
+      .map(toAbsoluteUrl)
+      .filter(Boolean);
+    const helper = window.XianyuImageUtils;
+    return helper?.dedupeUrls
+      ? helper.dedupeUrls(absolute, location.href)
+      : unique(absolute);
   }
 
   function valueToText(value, maxLength = 4000, depth = 0) {
@@ -106,7 +113,7 @@
   }
 
   function imageUrlsFromValue(value, output = [], depth = 0) {
-    if (value === undefined || value === null || depth > 4) return unique(output);
+    if (value === undefined || value === null || depth > 4) return dedupeImageUrls(output);
 
     if (typeof value === 'string') {
       const direct = toAbsoluteUrl(value);
@@ -116,22 +123,22 @@
         const url = toAbsoluteUrl(match.replace(/[),]+$/, ''));
         if (url) output.push(url);
       }
-      return unique(output).slice(0, 30);
+      return dedupeImageUrls(output).slice(0, 30);
     }
 
     if (Array.isArray(value)) {
       for (const entry of value) imageUrlsFromValue(entry, output, depth + 1);
-      return unique(output).slice(0, 30);
+      return dedupeImageUrls(output).slice(0, 30);
     }
 
     if (typeof value === 'object') {
       for (const key of ['url', 'src', 'originUrl', 'picUrl', 'pic', 'imageUrl', 'imgUrl', 'thumbUrl', 'path']) {
         if (value[key]) imageUrlsFromValue(value[key], output, depth + 1);
       }
-      return unique(output).slice(0, 30);
+      return dedupeImageUrls(output).slice(0, 30);
     }
 
-    return unique(output).slice(0, 30);
+    return dedupeImageUrls(output).slice(0, 30);
   }
 
   function extractItemIdFromUrl(value) {
@@ -192,7 +199,9 @@
     const merged = mergeItemValues(old, item);
 
     for (const field of ['images', 'reviewSamples']) {
-      merged[field] = unique([...(old[field] || []), ...(item[field] || [])]);
+      merged[field] = field === 'images'
+        ? dedupeImageUrls([...(old[field] || []), ...(item[field] || [])])
+        : unique([...(old[field] || []), ...(item[field] || [])]);
     }
 
     pageItems.set(key, merged);
@@ -255,9 +264,7 @@
       )),
       price: oneLine(item.price || '', 100),
       category: oneLine(item.category || item.serviceType || item.serviceCategory || '', 500),
-      images: unique((Array.isArray(item.images) ? item.images : imageUrlsFromValue(item.images))
-        .map(toAbsoluteUrl)
-        .filter(Boolean)).slice(0, 30),
+      images: dedupeImageUrls(Array.isArray(item.images) ? item.images : imageUrlsFromValue(item.images)).slice(0, 30),
       itemUrl: toAbsoluteUrl(item.itemUrl || item.url || ''),
       sellerName: oneLine(item.sellerName || item.seller || item.userName || '', 500),
       sellerUrl: toAbsoluteUrl(item.sellerUrl || item.shopUrl || item.userUrl || ''),
@@ -373,19 +380,13 @@
       }
       if (img.src) urls.push(toAbsoluteUrl(img.src));
     }
-    return unique(urls.filter(Boolean)).slice(0, 30);
+    return dedupeImageUrls(urls).slice(0, 30);
   }
 
   function detailImageUrlsFromRoot(root) {
-    if (!root?.querySelectorAll) return [];
-    const regions = root.querySelectorAll(`
-      [class^="item-main-window-carousel"], [class*="item-main-window-carousel"],
-      [class^="item-main-window-list"], [class*="item-main-window-list"],
-      [class^="carouselItem"], [class*=" carouselItem"]
-    `);
-    const urls = [];
-    for (const region of regions) urls.push(...imageUrlsFromRoot(region, true));
-    return unique(urls).slice(0, 30);
+    const helper = window.XianyuImageUtils;
+    if (helper?.collectDetailImageUrls) return helper.collectDetailImageUrls(root).slice(0, 30);
+    return [];
   }
 
   function textLines(root) {
@@ -1414,7 +1415,7 @@
       const merged = networkItem
         ? normalizeItem({
             ...mergeItemValues(networkItem, rawItem),
-            images: unique([...(networkItem.images || []), ...(rawItem.images || [])]),
+            images: dedupeImageUrls([...(networkItem.images || []), ...(rawItem.images || [])]),
             reviewSamples: unique([...(networkItem.reviewSamples || []), ...(rawItem.reviewSamples || [])]),
             itemUrl: rawItem.itemUrl,
             sourcePage: location.href
@@ -1718,43 +1719,9 @@
     while (networkBuffer.length > MAX_NETWORK_BUFFER) networkBuffer.shift();
   }
 
-  function diagnosticValue(value, depth = 0) {
-    if (value === null || value === undefined) return value;
-    if (typeof value === 'string') return value.slice(0, MAX_DIAGNOSTIC_STRING);
-    if (typeof value !== 'object') return value;
-    if (depth > 8) return '[TRUNCATED_DEPTH]';
-
-    if (Array.isArray(value)) {
-      return value.slice(0, 200).map(entry => diagnosticValue(entry, depth + 1));
-    }
-
-    const output = {};
-    for (const [key, child] of Object.entries(value).slice(0, 160)) {
-      if (/(?:cookie|authorization|token|secret|password|passwd|sign|session|sid|csrf|security)/i.test(key)) {
-        output[key] = '[REDACTED]';
-      } else {
-        output[key] = diagnosticValue(child, depth + 1);
-      }
-    }
-    return output;
-  }
-
-  function rememberRawNetworkPayload(payload) {
-    if (!payload || typeof payload !== 'object') return;
-    const entry = {
-      apiType: oneLine(payload.apiType || '', 40),
-      sourceUrl: toAbsoluteUrl(payload.sourceUrl || '') || location.origin,
-      capturedAt: payload.capturedAt || Date.now(),
-      response: diagnosticValue(payload.response)
-    };
-    rawNetworkBuffer.push(entry);
-    while (rawNetworkBuffer.length > MAX_RAW_NETWORK_BUFFER) rawNetworkBuffer.shift();
-  }
-
   function payloadItems(payload) {
     let safePayload = payload;
     try { safePayload = JSON.parse(JSON.stringify(payload)); } catch (_) { return []; }
-    rememberRawNetworkPayload(safePayload);
     const items = extractNetworkItems(
       safePayload?.response,
       safePayload?.apiType || 'SEARCH',
@@ -1762,93 +1729,6 @@
     );
     rememberNetworkItems(items);
     return items;
-  }
-
-  function diagnosticUrl(value) {
-    try {
-      const url = new URL(value, location.href);
-      for (const key of [
-        'sign', 'token', 'access_token', 'authorization', '_m_h5_tk', '_m_h5_tk_enc',
-        'session', 'sid', 'csrf', 'password', 'passwd'
-      ]) url.searchParams.delete(key);
-      url.hash = '';
-      return url.href;
-    } catch (_) {
-      return '';
-    }
-  }
-
-  function diagnosticDom() {
-    const root = document.querySelector('main') || document.body || document.documentElement;
-    if (!root) return { html: '', htmlTruncated: false, rootTag: '' };
-
-    const clone = root.cloneNode(true);
-    clone.querySelectorAll('script, style, link, noscript').forEach(node => node.remove());
-    clone.querySelectorAll('input, textarea').forEach(node => {
-      node.removeAttribute('value');
-      node.textContent = '';
-    });
-    const rawHtml = clone.outerHTML || '';
-    const limit = 8 * 1024 * 1024;
-    return {
-      html: rawHtml.slice(0, limit),
-      htmlTruncated: rawHtml.length > limit,
-      rootTag: root.tagName || ''
-    };
-  }
-
-  function diagnosticLinks() {
-    return [...document.querySelectorAll('a[href]')]
-      .slice(0, 1200)
-      .map(anchor => ({
-        text: oneLine(anchor.textContent || '', 300),
-        href: diagnosticUrl(anchor.href)
-      }))
-      .filter(entry => entry.href);
-  }
-
-  function diagnosticImages() {
-    const output = [];
-    const seen = new Set();
-    for (const image of [...document.querySelectorAll('img')].slice(0, 800)) {
-      for (const attr of ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-ks-lazyload']) {
-        const url = diagnosticUrl(image.getAttribute(attr) || '');
-        if (!url || seen.has(url)) continue;
-        seen.add(url);
-        output.push({ url, alt: oneLine(image.alt || '', 300) });
-      }
-    }
-    return output;
-  }
-
-  async function collectPageSnapshot() {
-    document.dispatchEvent(new CustomEvent(API_SNAPSHOT_REQUEST));
-    await new Promise(resolve => setTimeout(resolve, 180));
-    const dom = diagnosticDom();
-    const root = document.querySelector('main') || document.body || document.documentElement;
-    const text = String(root?.innerText || root?.textContent || '').slice(0, 100000);
-    const currentPageType = pageType();
-    const accountProfile = currentPageType === 'account' ? accountProfileFromPage() : null;
-    const { reviews: _reviews, ...accountProfileSummary } = accountProfile || {};
-    return {
-      ok: true,
-      capturedAt: new Date().toISOString(),
-      page: {
-        url: diagnosticUrl(location.href),
-        title: document.title,
-        pageType: currentPageType,
-        rootTag: dom.rootTag,
-        htmlTruncated: dom.htmlTruncated
-      },
-      html: dom.html,
-      visibleText: text,
-      links: diagnosticLinks(),
-      images: diagnosticImages(),
-      normalizedItems: [...pageItems.values()].slice(0, MAX_PAGE_ITEMS),
-      accountProfile: accountProfile ? accountProfileSummary : null,
-      networkResponses: rawNetworkBuffer.slice(-MAX_RAW_NETWORK_BUFFER),
-      networkResponseCount: rawNetworkBuffer.length
-    };
   }
 
   function delay(ms) {
@@ -2073,7 +1953,7 @@
           if (!ordered.has(key)) ordered.set(key, item);
           else ordered.set(key, {
             ...mergeItemValues(ordered.get(key), item),
-            images: unique([...(ordered.get(key).images || []), ...(item.images || [])]),
+            images: dedupeImageUrls([...(ordered.get(key).images || []), ...(item.images || [])]),
             reviewSamples: unique([...(ordered.get(key).reviewSamples || []), ...(item.reviewSamples || [])])
           });
         }
@@ -2569,7 +2449,7 @@
               foundByKey.set(key, previous
                 ? {
                     ...mergeItemValues(previous, item),
-                    images: unique([...(previous.images || []), ...(item.images || [])]),
+                    images: dedupeImageUrls([...(previous.images || []), ...(item.images || [])]),
                     reviewSamples: unique([...(previous.reviewSamples || []), ...(item.reviewSamples || [])])
                   }
                 : item);
@@ -2630,14 +2510,6 @@
         ready: false,
         pageType: pageType(),
         items: [],
-        error: error?.message || String(error)
-      }));
-      return true;
-    }
-
-    if (message?.type === 'GET_PAGE_SNAPSHOT') {
-      collectPageSnapshot().then(sendResponse).catch(error => sendResponse({
-        ok: false,
         error: error?.message || String(error)
       }));
       return true;

@@ -57,7 +57,7 @@
       await executeScript({
         target: { tabId },
         world: 'ISOLATED',
-        files: ['content.js']
+        files: ['image-utils.js', 'content.js']
       });
       try {
         return await sendToTab(tabId, message);
