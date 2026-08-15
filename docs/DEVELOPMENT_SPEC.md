@@ -1,6 +1,6 @@
 # 闲鱼公开商品研究采集器｜开发文档
 
-版本：0.6.1
+版本：0.6.2
 日期：2026-08-15
 实现基线：Chrome Manifest V3
 
@@ -98,11 +98,11 @@ Service Worker（任务编排、存储、通知、下载调度）
 
 ### 3.5 导出器：`xlsx.js` 与 offscreen 文档
 
-- `xlsx.js` 负责生成工作簿、可配置字段列、图片 drawing/media 和说明表；商品图片与商品字段在同一张“商品数据”表，主图保留在配置位置，额外图片列追加到表格末尾；店铺工作簿仍为“店铺资料”和“店铺评价综合”两张表。
+- `xlsx.js` 负责生成工作簿、可配置字段列、图片 drawing/media 和说明表；商品图片与商品字段在同一张“商品数据”表，主图保留在配置位置，额外图片列追加到表格末尾；店铺工作簿仍为“店铺资料”和“店铺评价综合”两张表。图片媒体按规范化 URL 和图片二进制双重去重，同一商品的重复图片会重新编号，不生成多余的图片2/图片3列。
 - 店铺工作簿固定只有两张数据表：“店铺资料”和“店铺评价综合”；导出时 workbook `activeTab=0` 打开“店铺资料”，店铺资料一店一行，评价和评价图片在第二张表按评价行合并。
 - 图片下载使用扩展已声明的 CDN host 权限，并优先 `credentials: omit`。
 - 可识别 JPEG/PNG/GIF/WEBP；优先保留原始 JPEG/PNG/GIF 二进制并尝试清除缩略图参数获取原图，对不兼容或超过 8192px/24MB 的图片才在 offscreen canvas 中转换，转换质量为 0.96。
-- 生成文件名时清洗 Windows 非法字符，按设置拼接相对目录。
+- 生成文件名时清洗 Windows 非法字符，按设置拼接相对目录；文件名固定为商品 `商品YYYYMMDD-HHmm.xlsx`、店铺评价 `店铺评价-店铺名-YYYYMMDD-HHmm.xlsx`、店铺全部商品 `商品表-店铺名-YYYYMMDD-HHmm.xlsx`。
 
 ## 4. 任务状态机
 
@@ -177,7 +177,7 @@ idle
 | `GET_JOB_STATUS` | 读取活动任务 |
 | `START_BATCH_LINKS` | 启动链接批量任务，携带 `links/mode` |
 | `START_SEARCH_CRAWL` | 启动搜索跨页任务，携带 `startUrl/targetCount/maxPages/mode` |
-| `START_STORE_PRODUCTS` | 启动店铺全部商品详情任务，携带 `storeUrl/mode`；先扫描店铺商品链接，再逐个访问详情页 |
+| `START_STORE_PRODUCTS` | 启动店铺全部商品详情任务，携带 `storeUrl/storeName/mode`；先扫描店铺商品链接，再逐个访问详情页 |
 | `STOP_JOB` | 停止活动任务 |
 | `PAUSE_JOB` / `RESUME_JOB` | 暂停或继续指定任务，不影响其它任务 |
 | `COMMIT_ITEMS` | 把当前详情页临时结果合并到数据中心商品表 |
@@ -219,7 +219,7 @@ idle
     sellerName, sellerUrl, sellerLocation, sellerFollowers, sellerFollowing,
     viewCount, wantCount, sellerProductCount, sellerIntro, storeDuration,
     reviewSummary, itemGoodRate, sellerReviewSummary, sellerReviewCount, reviewSamples,
-    publishedAt, sourcePage, dataSource, collectedAt
+    sourcePage, dataSource, collectedAt
   }],
   pageType: 'detail', sourcePage, reason
   persistToDataCenter: false
@@ -242,7 +242,7 @@ idle
 
 ### 商品主表
 
-默认 20 列，顺序为：`商品ID、商品链接、主图文件名、商品图片、商品文案、浏览数、想要数、价格、类目、店铺名称、卖家账号页、卖家地区、粉丝数、关注数、卖家商品数、店铺简介、开店时长、商品好评率、店铺评价数、采集时间`。设置中的字段配置可以选择其它可用字段并调整顺序；导出器只输出当前表对应的已选字段。浏览数和想要数来自当前详情页可见的对应标签或当前详情已收到的明确接口字段，无法对应时留空。商品图片字段只在配置位置生成主图列，额外的去重图片列统一追加到表格最后；同一逻辑图片不能因为 CDN 缩略图参数不同而重复嵌入。
+默认 20 列，顺序为：`商品ID、商品链接、主图文件名、商品图片、商品文案、浏览数、想要数、价格、类目、店铺名称、卖家账号页、卖家地区、粉丝数、关注数、卖家商品数、店铺简介、开店时长、商品好评率、店铺评价数、采集时间`。设置中的字段配置可以选择其它可用字段并调整顺序；导出器只输出当前表对应的已选字段。商品字段目录不再提供发布时间、商品评价摘要、店铺评价摘要、评价示例等不稳定辅助字段。浏览数和想要数来自当前详情页可见的对应标签或当前详情已收到的明确接口字段，无法对应时留空。商品图片字段只在配置位置生成主图列，额外的去重图片列统一追加到表格最后；同一逻辑图片不能因为 CDN 缩略图参数或重复二进制而重复嵌入。
 
 商品任务导出使用 `stagedItems` 或显式传入的临时商品集合；数据中心导出使用 `xianyu_public_items_v1`。两者只有在用户点击加入按钮后才合并。
 
@@ -274,7 +274,6 @@ idle
   mode: 'rpa' | 'api',
   downloadMode: 'auto' | 'manual',
   downloadFolder: '闲鱼研究采集',
-  fileNameTemplate: '闲鱼商品研究-{date}-{count}',
   saveAs: false,
   imageLimit: 0,
   maxEmbedImages: 1000,
@@ -284,7 +283,7 @@ idle
 }
 ```
 
-`downloadFolder` 只能是浏览器下载根目录下的相对路径，禁止 `..` 和绝对路径。`fileNameTemplate` 最终扩展名由插件统一追加 `.xlsx`。
+`downloadFolder` 只能是浏览器下载根目录下的相对路径，禁止 `..` 和绝对路径。文件名不再由用户模板控制，而是按商品、店铺评价、店铺全部商品三类数据自动生成，时间精确到分钟。
 
 ## 9. 错误处理
 

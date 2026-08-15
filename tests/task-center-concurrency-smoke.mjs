@@ -144,8 +144,39 @@ const context = vm.createContext({
 
 const source = fs.readFileSync(new URL('../background.js', import.meta.url), 'utf8');
 vm.runInContext(
-  `${source}\n;globalThis.__taskCenterTestApi = { writeJob, readJobs, readJob, jobLinkUrl, jobLinkItemId, collectedItemForLink, advanceLinkJob };`,
+  `${source}\n;globalThis.__taskCenterTestApi = { writeJob, readJobs, readJob, jobLinkUrl, jobLinkItemId, collectedItemForLink, advanceLinkJob, downloadFileName, exportTimestamp };`,
   context
+);
+
+assert.equal(
+  context.__taskCenterTestApi.exportTimestamp(new Date('2026-08-15T12:51:00+08:00')),
+  '20260815-1251',
+  'export timestamp must use local date and minute precision'
+);
+const filenameSettings = { downloadFolder: '研究导出' };
+assert.match(
+  context.__taskCenterTestApi.downloadFileName(filenameSettings, 3, 'data', 'rpa', {}, []),
+  /^研究导出\/商品\d{8}-\d{4}\.xlsx$/,
+  'product exports must use the 商品YYYYMMDD-HHmm filename rule'
+);
+assert.match(
+  context.__taskCenterTestApi.downloadFileName(filenameSettings, 3, 'store', 'rpa', {
+    storeProfiles: [{ sellerName: '小林爱写作' }]
+  }, []),
+  /^研究导出\/店铺评价-小林爱写作-\d{8}-\d{4}\.xlsx$/,
+  'store review exports must include the store name'
+);
+assert.match(
+  context.__taskCenterTestApi.downloadFileName(filenameSettings, 3, 'store-products', 'rpa', {}, [{ sellerName: '小林爱写作' }]),
+  /^研究导出\/商品表-小林爱写作-\d{8}-\d{4}\.xlsx$/,
+  'store product exports must include the store name'
+);
+assert.match(
+  context.__taskCenterTestApi.downloadFileName(filenameSettings, 3, 'store-products', 'rpa', {
+    storeName: '显式店铺名'
+  }, []),
+  /^研究导出\/商品表-显式店铺名-\d{8}-\d{4}\.xlsx$/,
+  'store product exports must prefer the persisted store name when item fields are incomplete'
 );
 
 assert.equal(

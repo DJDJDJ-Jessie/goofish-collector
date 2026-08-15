@@ -27,10 +27,6 @@
     { id: 'itemGoodRate', label: '商品好评率', group: '详情页卖家字段', defaultSelected: true },
     { id: 'sellerReviewCount', label: '店铺评价数', group: '店铺信息', defaultSelected: true },
     { id: 'imageStatus', label: '图片状态', group: '商品图片', defaultSelected: false },
-    { id: 'reviewSummary', label: '商品评价摘要', group: '评价摘要', defaultSelected: false },
-    { id: 'sellerReviewSummary', label: '店铺评价摘要', group: '评价摘要', defaultSelected: false },
-    { id: 'reviewSamples', label: '评价示例', group: '评价摘要', defaultSelected: false },
-    { id: 'publishedAt', label: '发布时间', group: '采集信息', defaultSelected: false },
     { id: 'sourcePage', label: '来源页面', group: '采集信息', defaultSelected: false },
     { id: 'dataSource', label: '数据来源', group: '采集信息', defaultSelected: false },
     { id: 'collectedAt', label: '采集时间', group: '采集信息', defaultSelected: true }

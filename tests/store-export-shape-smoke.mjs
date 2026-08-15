@@ -8,6 +8,8 @@ const context = vm.createContext({
 vm.runInContext(source, context);
 
 const imageBytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const imageBytesTwo = Uint8Array.from([...imageBytes, 1]);
+const imageBytesThree = Uint8Array.from([...imageBytes, 2]);
 const profile = {
   sellerName: '\u7efc\u5408\u6d4b\u8bd5\u5e97\u94fa',
   sellerUrl: 'https://www.goofish.com/personal?userId=store-merge-1',
@@ -50,12 +52,12 @@ const reviewAssets = [
   {
     kind: 'review', reviewKey: `${profile.sellerUrl}|review:2`, storeName: profile.sellerName,
     sellerUrl: profile.sellerUrl, reviewIndex: 2, imageIndex: 1, url: profile.reviews[1].images[0],
-    fileName: '\u7efc\u5408\u6d4b\u8bd5\u5e97\u94fa_\u8bc4\u4ef7002_\u56fe1.jpg', bytes: imageBytes, extension: 'jpg', width: 1, height: 1
+    fileName: '\u7efc\u5408\u6d4b\u8bd5\u5e97\u94fa_\u8bc4\u4ef7002_\u56fe1.jpg', bytes: imageBytesTwo, extension: 'jpg', width: 1, height: 1
   },
   {
     kind: 'review', reviewKey: `${profile.sellerUrl}|review:2`, storeName: profile.sellerName,
     sellerUrl: profile.sellerUrl, reviewIndex: 2, imageIndex: 2, url: profile.reviews[1].images[1],
-    fileName: '\u7efc\u5408\u6d4b\u8bd5\u5e97\u94fa_\u8bc4\u4ef7002_\u56fe2.jpg', bytes: imageBytes, extension: 'jpg', width: 1, height: 1
+    fileName: '\u7efc\u5408\u6d4b\u8bd5\u5e97\u94fa_\u8bc4\u4ef7002_\u56fe2.jpg', bytes: imageBytesThree, extension: 'jpg', width: 1, height: 1
   }
 ];
 

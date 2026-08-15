@@ -175,7 +175,6 @@
       sellerReviewSummary: item.sellerReviewSummary || '',
       sellerReviewCount: item.sellerReviewCount || '',
       reviewSamples: list(item.reviewSamples).join('\n'),
-      publishedAt: item.publishedAt || '',
       sourcePage: item.sourcePage || '',
       dataSource: item.dataSource || '',
       collectedAt: item.collectedAt || ''
@@ -239,6 +238,30 @@
     return null;
   }
 
+  // CDN 同一张图可能会因为缩略图参数不同而拥有不同 URL，甚至同一地址
+  // 经过不同的回退路径后也可能返回重复二进制。URL 去重只能解决第一层，
+  // 这里再用图片二进制做第二层去重，避免同一商品的“图片2/图片3”重复。
+  function bytesDedupKey(value) {
+    const bytes = toBytes(value);
+    if (!bytes?.length) return '';
+    let hash = 2166136261;
+    for (const byte of bytes) {
+      hash ^= byte;
+      hash = Math.imul(hash, 16777619);
+    }
+    return `bytes:${bytes.length}:${hash >>> 0}`;
+  }
+
+  function assetDedupKeys(asset, fallback) {
+    const keys = [];
+    const urlKey = imageDedupKey(asset?.url);
+    const byteKey = bytesDedupKey(asset?.bytes);
+    if (urlKey) keys.push(`url:${urlKey}`);
+    if (byteKey) keys.push(byteKey);
+    if (!keys.length && fallback) keys.push(fallback);
+    return keys;
+  }
+
   function extensionForAsset(asset) {
     const extension = String(asset?.extension || '').toLowerCase().replace(/[^a-z0-9]/g, '');
     if (extension === 'png' || extension === 'gif') return extension;
@@ -252,7 +275,7 @@
   }
 
   function assignMediaAssets(imageAssets) {
-    const mediaByUrl = new Map();
+    const mediaByKey = new Map();
     const mediaFiles = [];
     let mediaIndex = 1;
 
@@ -260,13 +283,12 @@
       const bytes = toBytes(raw?.bytes);
       if (!bytes || !bytes.length) return { ...raw, bytes: null };
 
-      const dedupeKey = raw.url || `${raw.itemKey || ''}|${raw.imageIndex || mediaIndex}`;
-      let media = mediaByUrl.get(dedupeKey);
+      const dedupeKeys = assetDedupKeys(raw, `${raw.itemKey || ''}|${raw.imageIndex || mediaIndex}`);
+      let media = dedupeKeys.map(key => mediaByKey.get(key)).find(Boolean);
       if (!media) {
         const extension = extensionForAsset(raw);
         const mediaName = `image_${String(mediaIndex++).padStart(4, '0')}.${extension}`;
         media = { mediaName, extension, bytes };
-        mediaByUrl.set(dedupeKey, media);
         mediaFiles.push({
           name: `xl/media/${mediaName}`,
           data: bytes,
@@ -274,6 +296,7 @@
           mime: contentTypeForExtension(extension)
         });
       }
+      dedupeKeys.forEach(key => mediaByKey.set(key, media));
 
       return { ...raw, bytes, mediaName: media.mediaName, extension: media.extension };
     });
@@ -396,8 +419,7 @@
         ['sellerName', '店铺名称'], ['sellerUrl', '卖家账号页'], ['sellerLocation', '卖家地区'], ['sellerFollowers', '粉丝数'],
         ['sellerFollowing', '关注数'], ['sellerProductCount', '卖家商品数'], ['sellerIntro', '店铺简介'], ['storeDuration', '开店时长'],
         ['itemGoodRate', '商品好评率'], ['sellerReviewCount', '店铺评价数'], ['imageStatus', '图片状态'],
-        ['reviewSummary', '商品评价摘要'], ['sellerReviewSummary', '店铺评价摘要'], ['reviewSamples', '评价示例'],
-        ['publishedAt', '发布时间'], ['sourcePage', '来源页面'], ['dataSource', '数据来源'], ['collectedAt', '采集时间']
+        ['sourcePage', '来源页面'], ['dataSource', '数据来源'], ['collectedAt', '采集时间']
       ],
       storeProfile: [
         ['sellerName', '店铺名称'], ['sellerUrl', '卖家账号页'], ['sellerLocation', '卖家地区'], ['sellerFollowers', '粉丝数'],
@@ -437,16 +459,30 @@
       .filter(asset => (asset.itemKey || itemKey(asset)) === itemKey(item))
       .sort((first, second) => Number(first.imageIndex || 0) - Number(second.imageIndex || 0));
     return deduped.filter(asset => {
-      const key = imageDedupKey(asset.url) || `${itemKey(item)}|${asset.imageIndex || ''}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
+      const keys = assetDedupKeys(asset, `${itemKey(item)}|${asset.imageIndex || ''}`);
+      if (keys.some(key => seen.has(key))) return false;
+      keys.forEach(key => seen.add(key));
       return true;
     }).map((asset, index) => ({ ...asset, imageIndex: index + 1 }));
   }
 
+  function imageAssetsByReview(reviewAssets, reviewKeyValue) {
+    const seen = new Set();
+    return reviewAssets
+      .filter(asset => (asset.reviewKey || `${asset.sellerUrl || asset.storeName || ''}|review:${asset.reviewIndex || ''}`) === reviewKeyValue)
+      .sort((first, second) => Number(first.imageIndex || 0) - Number(second.imageIndex || 0))
+      .filter(asset => {
+        const keys = assetDedupKeys(asset, `${reviewKeyValue}|${asset.imageIndex || ''}`);
+        if (keys.some(key => seen.has(key))) return false;
+        keys.forEach(key => seen.add(key));
+        return true;
+      })
+      .map((asset, index) => ({ ...asset, imageIndex: index + 1 }));
+  }
+
   function imageStatusText(item, assets) {
     if (!item.images.length) return '';
-    const expected = item.images.length;
+    const expected = assets.length || item.images.length;
     const embedded = assets.filter(asset => Boolean(asset.bytes?.length)).length;
     const failed = assets.filter(asset => !asset.bytes?.length).length + Math.max(0, expected - assets.length);
     if (embedded >= expected) return '成功';
@@ -472,9 +508,10 @@
 
   function reviewImageStatusText(review, assets) {
     if (!review.images.length) return '';
+    const expected = assets.length || review.images.length;
     const embedded = assets.filter(asset => Boolean(asset.bytes?.length)).length;
-    if (embedded >= review.images.length) return '成功';
-    if (embedded > 0) return `部分成功：${embedded}/${review.images.length}`;
+    if (embedded >= expected) return '成功';
+    if (embedded > 0) return `部分成功：${embedded}/${expected}`;
     return `下载失败：${assets.find(asset => asset.error)?.error || '未获取到图片二进制'}`;
   }
 
@@ -497,7 +534,8 @@
       const item = normalizeItem(raw);
       const assets = imageAssetsByItem(productAssets, item);
       productAssetMap.set(itemKey(item), assets);
-      productImageSlots = Math.max(productImageSlots, item.images.length, ...assets.map(asset => Number(asset.imageIndex) || 0));
+      const logicalImageCount = assets.length || item.images.length;
+      productImageSlots = Math.max(productImageSlots, logicalImageCount, ...assets.map(asset => Number(asset.imageIndex) || 0));
     }
     productImageSlots = Math.min(30, productImageSlots);
 
@@ -554,12 +592,16 @@
       if (!reviewAssetMap.has(key)) reviewAssetMap.set(key, []);
       reviewAssetMap.get(key).push(asset);
     }
+    for (const key of reviewAssetMap.keys()) {
+      reviewAssetMap.set(key, imageAssetsByReview(reviewAssets, key));
+    }
 
     let reviewImageSlots = reviewImageEnabled ? 1 : 0;
     for (const profile of safeProfiles) {
       for (const review of profile.reviews) {
         const assets = reviewAssetMap.get(reviewKey(profile, review, review.reviewIndex - 1)) || [];
-        reviewImageSlots = Math.max(reviewImageSlots, review.images.length, ...assets.map(asset => Number(asset.imageIndex) || 0));
+        const logicalImageCount = assets.length || review.images.length;
+        reviewImageSlots = Math.max(reviewImageSlots, logicalImageCount, ...assets.map(asset => Number(asset.imageIndex) || 0));
       }
     }
     reviewImageSlots = Math.min(30, reviewImageSlots);
@@ -611,7 +653,7 @@
           const value = fieldId === 'sellerName' ? profile.sellerName
             : fieldId === 'sellerUrl' ? profile.sellerUrl
               : fieldId === 'reviewIndex' ? (review.reviewIndex || reviewIndex + 1)
-                : fieldId === 'reviewImageCount' ? review.images.length
+                : fieldId === 'reviewImageCount' ? (assets.length || review.images.length)
                   : fieldId === 'reviewImageNames' ? imageNames.join('\n')
                     : fieldId === 'reviewImageStatus' ? reviewImageStatusText(review, assets)
                       : fieldId === 'reviewImageFailureUrl' ? failedUrls.join('\n')

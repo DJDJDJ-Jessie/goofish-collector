@@ -37,7 +37,6 @@ const DEFAULT_SETTINGS = Object.freeze({
   mode: 'rpa',
   downloadMode: 'manual',
   downloadFolder: '闲鱼研究采集',
-  fileNameTemplate: '闲鱼商品研究-{date}-{count}',
   saveAs: false,
   imageLimit: 0,
   maxEmbedImages: 1000,
@@ -82,7 +81,6 @@ const ALLOWED_FIELDS = [
   'sellerReviewSummary',
   'sellerReviewCount',
   'reviewSamples',
-  'publishedAt',
   'sourcePage',
   'dataSource',
   'collectedAt'
@@ -387,11 +385,6 @@ function normalizeSettings(input = {}) {
     .map(part => part.trim())
     .filter(part => part && part !== '.')
     .join('/');
-  const template = cleanText(input.fileNameTemplate ?? DEFAULT_SETTINGS.fileNameTemplate, 160)
-    .replace(/[\\/:*?"<>|]+/g, '_')
-    .replace(/\.xlsx$/i, '')
-    .trim() || DEFAULT_SETTINGS.fileNameTemplate;
-
   const normalizeFieldSelection = (value, type, fallback) => {
     const definitions = Array.isArray(FIELD_CATALOG.fields?.[type]) ? FIELD_CATALOG.fields[type] : [];
     const valid = new Set(definitions.map(field => field.id));
@@ -408,7 +401,6 @@ function normalizeSettings(input = {}) {
     mode: input.mode === 'api' ? 'api' : 'rpa',
     downloadMode: input.downloadMode === 'auto' ? 'auto' : 'manual',
     downloadFolder: folder || DEFAULT_SETTINGS.downloadFolder,
-    fileNameTemplate: template,
     saveAs: Boolean(input.saveAs),
     imageLimit: Math.max(0, Math.min(30, Number(input.imageLimit) || 0)),
     maxEmbedImages: Math.max(1, Math.min(1000, Number(input.maxEmbedImages) || DEFAULT_SETTINGS.maxEmbedImages)),
@@ -470,6 +462,7 @@ function historySummary(job, items, extra = {}) {
     failureRecords: jobFailureRecords(job),
     autoExportStatus: extra.autoExportStatus || '',
     fileName: extra.fileName || '',
+    storeName: cleanText(extra.storeName || job.storeName || '', 500),
     itemCount: Array.isArray(snapshot) ? snapshot.length : 0,
     itemsSnapshot: Array.isArray(snapshot) ? snapshot.slice(0, MAX_ITEMS) : [],
     storeProfilesSnapshot: Array.isArray(extra.storeProfilesSnapshot)
@@ -876,32 +869,32 @@ function cleanDownloadPart(value, fallback = '未命名') {
   return cleaned || fallback;
 }
 
-function downloadFileName(settings, count, type, mode) {
-  const now = new Date();
-  const date = now.toISOString().slice(0, 10);
-  const time = now.toTimeString().slice(0, 8).replace(/:/g, '');
-  const values = {
-    date,
-    time,
-    count: String(count),
-    type: type === 'links'
-      ? '链接批量'
-      : type === 'store-products'
-        ? '店铺商品'
-      : type === 'store'
-        ? '店铺资料'
-        : type === 'detail'
-          ? '当前详情'
-          : type === 'data'
-            ? '数据中心商品'
-            : '搜索跨页',
-    mode: mode === 'api' ? '接口观察' : '页面详情'
-  };
-  const base = cleanDownloadPart(
-    String(settings.fileNameTemplate || DEFAULT_SETTINGS.fileNameTemplate)
-      .replace(/\{(date|time|count|type|mode)\}/g, (_match, key) => values[key]),
-    '闲鱼商品研究'
+function exportStoreName(items, context = {}) {
+  const profileName = Array.isArray(context.storeProfiles)
+    ? context.storeProfiles.find(profile => cleanText(profile?.sellerName, 200))?.sellerName
+    : '';
+  const itemName = Array.isArray(items)
+    ? items.find(item => cleanText(item?.sellerName, 200))?.sellerName
+    : '';
+  return cleanDownloadPart(
+    context.storeName || profileName || itemName || '未知店铺',
+    '未知店铺'
   );
+}
+
+function exportTimestamp(now = new Date()) {
+  const part = value => String(value).padStart(2, '0');
+  return `${now.getFullYear()}${part(now.getMonth() + 1)}${part(now.getDate())}-${part(now.getHours())}${part(now.getMinutes())}`;
+}
+
+function downloadFileName(settings, count, type, mode, context = {}, items = []) {
+  const stamp = exportTimestamp();
+  const storeName = exportStoreName(items, context);
+  const base = type === 'store'
+    ? `店铺评价-${storeName}-${stamp}`
+    : type === 'store-products'
+      ? `商品表-${storeName}-${stamp}`
+      : `商品${stamp}`;
   const folder = String(settings.downloadFolder || '')
     .split('/')
     .map(part => cleanDownloadPart(part, ''))
@@ -922,7 +915,9 @@ function runExport(items, settings, context = {}) {
       settings,
       exportCount,
       exportType,
-      context.mode || settings.mode
+      context.mode || settings.mode,
+      context,
+      items
     );
     const prepared = await sendRuntimeMessage({
       type: 'OFFSCREEN_EXPORT',
@@ -1475,6 +1470,7 @@ async function finishJob(job, status, message, options = {}) {
         exportResult = await runExport(jobItems, settings, {
           type: finalJob.type,
           mode: finalJob.mode,
+          storeName: finalJob.storeName || '',
           // 商品任务只导出商品结果。店铺资料和评价必须通过“当前店铺页”单独导出，
           // 不能因为浏览器里有历史店铺资料就混入商品工作簿。
           storeProfiles: []
@@ -1498,6 +1494,7 @@ async function finishJob(job, status, message, options = {}) {
   await recordHistory(finalJob, {
     autoExportStatus: finalJob.autoExportStatus,
     fileName: finalJob.fileName,
+    storeName: finalJob.storeName || '',
     itemsSnapshot: jobItems,
     storeProfilesSnapshot: []
   });
@@ -2103,7 +2100,7 @@ async function startLinksJob(links, delayMs = 1500, mode = 'rpa') {
   return scheduleJob(job, 'ready-to-collect', 1400);
 }
 
-async function startStoreProductsJob(storeUrl, delayMs = 1800, mode = 'rpa') {
+async function startStoreProductsJob(storeUrl, delayMs = 1800, mode = 'rpa', storeName = '') {
   let parsed;
   try {
     parsed = new URL(storeUrl);
@@ -2120,6 +2117,7 @@ async function startStoreProductsJob(storeUrl, delayMs = 1800, mode = 'rpa') {
     id: `store-products-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     type: 'store-products',
     mode: mode === 'api' ? 'api' : 'rpa',
+    storeName: cleanText(storeName, 500),
     status: 'waiting-page',
     stage: 'store-page',
     storeUrl: cleanUrl(storeUrl),
@@ -2542,6 +2540,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const result = await runExport(items, settings, {
           type: taskType,
           mode: message.mode || settings.mode,
+          storeName: cleanText(message.storeName || '', 500),
           storeProfiles
         });
         return { ok: true, result };
@@ -2559,6 +2558,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const result = await runExport(items, settings, {
           type: job.type,
           mode: job.mode || settings.mode,
+          storeName: job.storeName || '',
           storeProfiles: []
         });
         return { ok: true, result };
@@ -2573,6 +2573,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const result = await runExport(isStoreHistory ? [] : (entry.itemsSnapshot || []), settings, {
           type: entry.type,
           mode: entry.mode,
+          storeName: entry.storeName || '',
           storeProfiles: isStoreHistory && Array.isArray(entry.storeProfilesSnapshot)
             ? entry.storeProfilesSnapshot
             : []
@@ -2626,7 +2627,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const settings = await readSettings();
         return {
           ok: true,
-          job: await startStoreProductsJob(storeUrl, message.delayMs, message.mode || settings.mode)
+          job: await startStoreProductsJob(
+            storeUrl,
+            message.delayMs,
+            message.mode || settings.mode,
+            message.storeName || ''
+          )
         };
       }
 

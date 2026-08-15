@@ -6,7 +6,6 @@
     mode: 'rpa',
     downloadMode: 'manual',
     downloadFolder: '闲鱼研究采集',
-    fileNameTemplate: '闲鱼商品研究-{date}-{count}',
     saveAs: false,
     imageLimit: 0,
     maxEmbedImages: 1000,
@@ -380,7 +379,6 @@
     $('downloadAuto').checked = settings.downloadMode === 'auto';
     $('downloadManual').checked = settings.downloadMode !== 'auto';
     $('downloadFolder').value = settings.downloadFolder || '';
-    $('fileNameTemplate').value = settings.fileNameTemplate || '';
     $('imageLimit').value = String(settings.imageLimit ?? 0);
     $('maxEmbedImages').value = String(settings.maxEmbedImages ?? 1000);
     $('collectSellerInfo').checked = settings.collectSellerInfo !== false;
@@ -1121,6 +1119,9 @@
       const response = await sendRuntime({
         type: 'START_STORE_PRODUCTS',
         storeUrl: activeTab.url,
+        storeName: pendingCurrentStoreProfile?.sellerName
+          || currentStoreStatus?.profile?.sellerName
+          || '',
         mode: selectedMode,
         delayMs: 2200
       });
@@ -1389,6 +1390,9 @@
         sellerUrl: isCurrentStoreExport
           ? (pendingCurrentStoreProfile?.sellerUrl || pendingCurrentStoreSourceUrl || activeTab?.url || '')
           : undefined,
+        storeName: isCurrentStoreExport
+          ? (pendingCurrentStoreProfile?.sellerName || currentStoreStatus?.profile?.sellerName || '')
+          : undefined,
         storeProfiles: isCurrentStoreExport && pendingCurrentStoreProfile
           ? [pendingCurrentStoreProfile]
           : undefined
@@ -1567,7 +1571,6 @@
       mode: selectedMode,
       downloadMode: $('downloadAuto').checked ? 'auto' : 'manual',
       downloadFolder: $('downloadFolder').value,
-      fileNameTemplate: $('fileNameTemplate').value,
       imageLimit: Number($('imageLimit').value || 0),
       maxEmbedImages: Number($('maxEmbedImages').value || 1000),
       collectSellerInfo: $('collectSellerInfo').checked,

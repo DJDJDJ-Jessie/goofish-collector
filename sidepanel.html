@@ -105,7 +105,7 @@
               </button>
               <button class="menu-row" type="button" data-open-screen="settings">
                 <span class="row-icon sand">⚙</span>
-                <span class="row-copy"><strong>下载与字段设置</strong><small>自动下载、图片、卖家资料和文件名</small></span>
+                <span class="row-copy"><strong>下载与字段设置</strong><small>自动下载、图片、卖家资料和字段顺序</small></span>
                 <span class="row-chevron">›</span>
               </button>
             </section>
@@ -317,8 +317,7 @@ https://www.goofish.com/item?id=…"></textarea>
               <h3>文件与图片</h3>
               <label class="form-label">下载子文件夹<input id="downloadFolder" type="text" placeholder="闲鱼研究采集" /></label>
               <p class="field-note">位置相对于浏览器默认下载目录；绝对路径由 Chrome 的下载设置控制。</p>
-              <label class="form-label">文件名模板<input id="fileNameTemplate" type="text" placeholder="闲鱼商品研究-{date}-{count}" /></label>
-              <p class="field-note">可用变量：{date}、{time}、{count}、{type}、{mode}</p>
+              <p class="field-note">文件名按数据类型自动生成：商品YYYYMMDD-HHmm、店铺评价-店铺名-YYYYMMDD-HHmm、商品表-店铺名-YYYYMMDD-HHmm。</p>
               <div class="field-grid large-grid settings-grid">
                 <label class="form-label">每个商品图片<select id="imageLimit"><option value="0">全部</option><option value="3">最多 3 张</option><option value="5">最多 5 张</option><option value="10">最多 10 张</option></select></label>
                 <label class="form-label">商品图片上限<select id="maxEmbedImages"><option value="300">300 张</option><option value="500">500 张</option><option value="1000">1000 张</option></select></label>

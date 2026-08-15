@@ -187,6 +187,52 @@
     throw lastError || new Error('图片下载失败');
   }
 
+  function bytesDedupKey(value) {
+    const bytes = value instanceof Uint8Array
+      ? value
+      : value instanceof ArrayBuffer
+        ? new Uint8Array(value)
+        : ArrayBuffer.isView(value)
+          ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+          : null;
+    if (!bytes?.length) return '';
+    let hash = 2166136261;
+    for (const byte of bytes) {
+      hash ^= byte;
+      hash = Math.imul(hash, 16777619);
+    }
+    return `bytes:${bytes.length}:${hash >>> 0}`;
+  }
+
+  function renumberImageFileName(fileName, imageIndex) {
+    const sequence = String(imageIndex).padStart(2, '0');
+    return String(fileName || '').replace(/图\d+(?=\.[a-z\d]+$)/i, `图${sequence}`);
+  }
+
+  function dedupePreparedAssets(assets) {
+    const seenByScope = new Map();
+    const nextIndexByScope = new Map();
+    return assets.filter(Boolean).filter(asset => {
+      const scope = asset.kind === 'review'
+        ? `review:${asset.reviewKey || asset.itemKey || asset.storeName || ''}`
+        : `product:${asset.itemKey || asset.itemId || asset.itemUrl || ''}`;
+      const keys = [
+        imageDedupKey(asset.url) ? `url:${imageDedupKey(asset.url)}` : '',
+        bytesDedupKey(asset.bytes)
+      ].filter(Boolean);
+      if (!keys.length) keys.push(`index:${asset.imageIndex || ''}`);
+      const seen = seenByScope.get(scope) || new Set();
+      if (keys.some(key => seen.has(key))) return false;
+      keys.forEach(key => seen.add(key));
+      seenByScope.set(scope, seen);
+      const imageIndex = (nextIndexByScope.get(scope) || 0) + 1;
+      nextIndexByScope.set(scope, imageIndex);
+      asset.imageIndex = imageIndex;
+      asset.fileName = renumberImageFileName(asset.fileName, imageIndex);
+      return true;
+    });
+  }
+
   async function prepareImageAssets(items, settings, storeProfiles, fieldConfig = {}) {
     const perItemLimit = Math.max(0, Number(settings?.imageLimit) || 0);
     const maxImages = Math.max(1, Math.min(1000, Number(settings?.maxEmbedImages) || 1000));
@@ -270,11 +316,12 @@
     }
 
     await Promise.all(Array.from({ length: Math.min(4, Math.max(1, jobs.length)) }, () => worker()));
+    const dedupedAssets = dedupePreparedAssets(assets);
     return {
-      assets,
-      requested: jobs.length,
-      productImageCount: productCandidates.length,
-      reviewImageCount: reviewCandidates.length,
+      assets: dedupedAssets,
+      requested: dedupedAssets.length,
+      productImageCount: dedupedAssets.filter(asset => asset.kind !== 'review').length,
+      reviewImageCount: dedupedAssets.filter(asset => asset.kind === 'review').length,
       truncated: productCandidates.length > maxImages || reviewCandidates.length > MAX_REVIEW_IMAGE_ASSETS
     };
   }
