@@ -19,7 +19,36 @@ const TAB_MESSAGE_TIMEOUT_MS = 12000;
 const JOB_STALE_TIMEOUT_MS = 90000;
 const MAX_TASKS = 100;
 const cancelledJobIds = new Set();
+const pendingDownloadNames = new Map();
 let jobWriteQueue = Promise.resolve();
+
+function rememberDownloadName(url, filename) {
+  const key = String(url || '');
+  const value = String(filename || '');
+  if (!key || !value) return;
+  pendingDownloadNames.set(key, value);
+  const timer = setTimeout(() => {
+    if (pendingDownloadNames.get(key) === value) pendingDownloadNames.delete(key);
+  }, 60_000);
+  // Node-based smoke tests expose an unref-able timer; Chrome returns a numeric
+  // handle, so this is intentionally optional and has no browser-side effect.
+  timer?.unref?.();
+}
+
+function forgetDownloadName(url) {
+  pendingDownloadNames.delete(String(url || ''));
+}
+
+if (globalThis.chrome?.downloads?.onDeterminingFilename?.addListener) {
+  chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+    const keys = [downloadItem?.url, downloadItem?.finalUrl].filter(Boolean).map(String);
+    const matchedKey = keys.find(key => pendingDownloadNames.has(key));
+    const filename = matchedKey ? pendingDownloadNames.get(matchedKey) : '';
+    if (matchedKey) pendingDownloadNames.delete(matchedKey);
+    if (filename) suggest({ filename });
+    else suggest();
+  });
+}
 
 function markJobCancelled(jobId) {
   if (!jobId) return;
@@ -591,6 +620,19 @@ async function clearJobAlarm(jobId) {
   await Promise.resolve(chrome.alarms.clear(JOB_ALARM)).catch(() => {});
 }
 
+async function clearAllJobs() {
+  const jobs = await readJobs();
+  jobs.forEach(job => markJobCancelled(job.id));
+  await Promise.all(jobs.map(job => clearJobAlarm(job.id)));
+  await clearJobAlarm('');
+  await Promise.all(jobs
+    .map(job => Number(job?.tabId))
+    .filter(tabId => Number.isInteger(tabId))
+    .map(tabId => tabsRemove(tabId).catch(() => {})));
+  await writeJobs([]);
+  return jobs.length;
+}
+
 function jobFailureRecords(job) {
   const detailFailures = (Array.isArray(job?.failures) ? job.failures : [])
     .map(entry => ({
@@ -938,6 +980,7 @@ function runExport(items, settings, context = {}) {
     }
 
     let downloadId;
+    rememberDownloadName(prepared.url, filename);
     try {
       downloadId = await new Promise((resolve, reject) => {
         chrome.downloads.download({
@@ -950,6 +993,9 @@ function runExport(items, settings, context = {}) {
           else resolve(id);
         });
       });
+    } catch (error) {
+      forgetDownloadName(prepared.url);
+      throw error;
     } finally {
       await sendRuntimeMessage({
         type: 'OFFSCREEN_RELEASE',
@@ -2480,16 +2526,52 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'GET_STATUS':
         return { ok: true, count: (await readItems()).length, storeCount: (await readStoreProfiles()).length };
 
-      case 'GET_STORE_STATUS': {
-        const sellerUrl = validSellerUrl(message.sellerUrl || sender?.tab?.url || '');
-        const profiles = await readStoreProfiles();
-        const key = sellerProfileKey(sellerUrl);
-        const profile = key
-          ? profiles.find(item => sellerProfileKey(item?.sellerUrl || '') === key) || null
-          : null;
+      case 'GET_ITEM_STATUS': {
+        const requestedUrl = validItemUrl(message.itemUrl || '') || cleanUrl(message.itemUrl || '');
+        const requestedId = cleanText(message.itemId || itemIdFromUrl(requestedUrl), 200);
+        const [items, history, jobs] = await Promise.all([
+          readItems(),
+          readHistory(),
+          readJobs()
+        ]);
+        const historicalItems = [
+          ...history.flatMap(entry => Array.isArray(entry?.itemsSnapshot) ? entry.itemsSnapshot : []),
+          ...jobs.flatMap(job => Array.isArray(job?.stagedItems) ? job.stagedItems : [])
+        ];
+        const item = [...items, ...historicalItems].find(candidate => (
+          (requestedId && cleanText(candidate?.itemId, 200) === requestedId)
+          || (requestedUrl && itemUrlsMatch(candidate?.itemUrl || '', requestedUrl))
+        )) || null;
         return {
           ok: true,
-          exists: Boolean(profile),
+          exists: Boolean(item),
+          source: item && items.includes(item) ? 'data-center' : item ? 'history' : '',
+          item: item ? {
+            itemId: item.itemId || '',
+            itemUrl: item.itemUrl || '',
+            sellerName: item.sellerName || '',
+            collectedAt: item.collectedAt || ''
+          } : null
+        };
+      }
+
+      case 'GET_STORE_STATUS': {
+        const sellerUrl = validSellerUrl(message.sellerUrl || sender?.tab?.url || '');
+        const [profiles, history] = await Promise.all([readStoreProfiles(), readHistory()]);
+        const key = sellerProfileKey(sellerUrl);
+        const storedProfile = key
+          ? profiles.find(item => sellerProfileKey(item?.sellerUrl || '') === key) || null
+          : null;
+        const historicalProfile = key
+          ? history
+            .flatMap(entry => Array.isArray(entry?.storeProfilesSnapshot) ? entry.storeProfilesSnapshot : [])
+            .find(item => sellerProfileKey(item?.sellerUrl || '') === key) || null
+          : null;
+        const profile = storedProfile || historicalProfile;
+        return {
+          ok: true,
+          exists: Boolean(storedProfile),
+          historyExists: Boolean(storedProfile || historicalProfile),
           storeCount: profiles.length,
           profile: profile ? {
             sellerName: profile.sellerName,
@@ -2519,6 +2601,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'CLEAR_HISTORY':
         await writeHistory([]);
         return { ok: true, history: [] };
+
+      case 'CLEAR_JOBS':
+        return { ok: true, cleared: await clearAllJobs(), jobs: [] };
 
       case 'EXPORT_ITEMS': {
         const settings = await readSettings();

@@ -258,6 +258,7 @@
     const byteKey = bytesDedupKey(asset?.bytes);
     if (urlKey) keys.push(`url:${urlKey}`);
     if (byteKey) keys.push(byteKey);
+    if (asset?.visualKey) keys.push(String(asset.visualKey));
     if (!keys.length && fallback) keys.push(fallback);
     return keys;
   }

@@ -66,7 +66,7 @@
               </button>
               <button class="menu-row" type="button" data-open-screen="store">
                 <span class="row-icon orange">◎</span>
-                <span class="row-copy"><strong>采集当前店铺评价</strong><small>店铺资料单独一表，评价和图片合并一表</small></span>
+                <span class="row-copy"><strong>采集当前店铺数据</strong><small>采集店铺评价，或逐个采集店铺商品详情</small></span>
                 <span class="row-chevron">›</span>
               </button>
               <button class="menu-row" type="button" data-open-screen="links">
@@ -95,12 +95,12 @@
               </button>
               <button class="menu-row" type="button" data-open-screen="history">
                 <span class="row-icon slate">◷</span>
-                <span class="row-copy"><strong>采集历史</strong><small>查看任务结果，重新导出或删除</small></span>
+                <span class="row-copy"><strong>采集历史</strong><small>查看、重新导出或清空历史记录</small></span>
                 <span class="row-chevron">›</span>
               </button>
               <button class="menu-row" type="button" data-open-screen="tasks">
                 <span class="row-icon teal">◌</span>
-                <span class="row-copy"><strong>任务中心</strong><small id="homeTaskHint">查看进行中、已暂停和已完成的任务</small></span>
+                <span class="row-copy"><strong>任务中心</strong><small id="homeTaskHint">查看任务状态，暂停、导出或清空任务</small></span>
                 <span class="row-chevron">›</span>
               </button>
               <button class="menu-row" type="button" data-open-screen="settings">
@@ -139,7 +139,7 @@
           <section class="page-intro">
             <span class="intro-label">CURRENT DETAIL</span>
             <h2>采集当前商品详情</h2>
-            <p>读取当前商品详情，并自动补充卖家店铺的基础公开资料；完整店铺评价和评价图片仍通过“采集当前店铺评价”单独获取。</p>
+            <p>读取当前商品详情，并自动补充卖家店铺的基础公开资料；完整店铺评价和评价图片仍通过“采集当前店铺数据”中的评价功能获取。</p>
           </section>
 
           <section class="context-card detail-context-card" aria-live="polite">
@@ -173,8 +173,8 @@
         <section id="screen-store" class="screen" data-screen="store" aria-labelledby="screenTitle">
           <section class="page-intro">
             <span class="intro-label">CURRENT STORE</span>
-            <h2>采集当前店铺评价</h2>
-            <p>读取店铺公开资料，自动进入评价区域并尽量加载全部公开评价；导出为“店铺资料”和“店铺评价综合”两张表，评价图片直接嵌入对应评价行。</p>
+            <h2>采集当前店铺数据</h2>
+            <p>从当前店铺页选择采集公开评价，或建立任务逐个采集店铺下的全部商品详情。</p>
           </section>
 
           <section class="context-card detail-context-card" aria-live="polite">
@@ -191,7 +191,7 @@
             <span class="success-kicker">COLLECTION COMPLETE</span>
             <div class="success-orb" aria-hidden="true"><span>✓</span></div>
             <h3>采集完成</h3>
-            <p id="storeSuccessSummary">当前店铺评价已暂存，可以选择加入店铺表或直接下载。</p>
+            <p id="storeSuccessSummary">当前店铺资料和评价已暂存，可以选择加入店铺表或直接下载。</p>
           </section>
 
           <section class="action-card">
@@ -200,7 +200,7 @@
             <button id="storeCommitButton" class="button teal-action large" type="button" disabled>加到数据中心店铺表</button>
             <button id="storeExportButton" class="button teal-action large" type="button" disabled>立即下载店铺 Excel</button>
             <button id="storeDataButton" class="button outline-action" type="button">查看数据中心店铺表</button>
-            <p id="storeCollectHint" class="helper">“采集当前店铺评价”读取店铺资料和全部公开评价；“采集店铺全部商品详情”会建立独立任务，逐个进入店铺商品详情页。</p>
+            <p id="storeCollectHint" class="helper">这里有两个独立功能：采集当前店铺评价，或采集店铺全部商品详情。两者结果分别进入店铺表和商品任务。</p>
           </section>
         </section>
 
@@ -285,7 +285,10 @@ https://www.goofish.com/item?id=…"></textarea>
           </section>
           <section class="task-center-toolbar">
             <div><strong id="taskCenterCount">0</strong><span>个任务</span></div>
-            <button id="refreshTasksButton" class="button small outline-action" type="button">刷新状态</button>
+            <div class="toolbar-actions">
+              <button id="refreshTasksButton" class="button small outline-action" type="button">刷新状态</button>
+              <button id="clearTasksButton" class="button small danger-outline" type="button">清空全部任务</button>
+            </div>
           </section>
           <div id="tasksList" class="tasks-list"><p class="empty-state">还没有任务记录。</p></div>
         </section>
@@ -294,7 +297,11 @@ https://www.goofish.com/item?id=…"></textarea>
           <section class="page-intro">
             <span class="intro-label">TASK ARCHIVE</span>
             <h2>采集历史</h2>
-            <p>保留最近任务的处理结果，可重新导出；删除历史不会影响当前数据。</p>
+            <p>保留最近任务的处理结果，可重新导出；清空历史不会影响数据中心和正在运行的任务。</p>
+          </section>
+          <section class="history-toolbar">
+            <span id="historyCountText">0 条历史记录</span>
+            <button id="clearHistoryButton" class="button small danger-outline" type="button">清空全部历史</button>
           </section>
           <div id="historyList" class="history-list"><p class="empty-state">还没有完成的任务。</p></div>
         </section>

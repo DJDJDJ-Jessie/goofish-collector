@@ -70,6 +70,47 @@
     });
   }
 
+  function visualDedupKeyFromCanvas(canvas) {
+    try {
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      if (!context) return '';
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let first = 2166136261;
+      let second = 0x9e3779b9;
+      for (let index = 0; index < pixels.length; index += 4) {
+        const value = ((pixels[index] >> 3) << 11)
+          | ((pixels[index + 1] >> 3) << 6)
+          | ((pixels[index + 2] >> 3) << 1)
+          | (pixels[index + 3] >> 7);
+        first ^= value;
+        first = Math.imul(first, 16777619);
+        second ^= value + index;
+        second = Math.imul(second, 2246822519);
+      }
+      return `visual:32:${first >>> 0}:${second >>> 0}`;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  async function visualDedupKeyFromBitmap(bitmap) {
+    try {
+      const size = 32;
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      if (!context) return '';
+      context.imageSmoothingEnabled = true;
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, size, size);
+      context.drawImage(bitmap, 0, 0, size, size);
+      return visualDedupKeyFromCanvas(canvas);
+    } catch (_) {
+      return '';
+    }
+  }
+
   async function decodeImageBlob(blob, sourceUrl) {
     const rawBytes = new Uint8Array(await blob.arrayBuffer());
     const sourceMime = mimeFromBytes(rawBytes, blob.type, sourceUrl);
@@ -90,10 +131,11 @@
     }
 
     try {
+      const visualKey = await visualDedupKeyFromBitmap(bitmap);
       const supported = ['image/jpeg', 'image/png', 'image/gif'].includes(sourceMime);
       const withinLimit = width <= MAX_IMAGE_SIDE && height <= MAX_IMAGE_SIDE && rawBytes.length <= MAX_IMAGE_BYTES;
       if (supported && withinLimit) {
-        return { bytes: rawBytes, mime: sourceMime, extension: extensionFromMime(sourceMime), width, height };
+        return { bytes: rawBytes, mime: sourceMime, extension: extensionFromMime(sourceMime), width, height, visualKey };
       }
 
       const scale = Math.min(1, MAX_IMAGE_SIDE / width, MAX_IMAGE_SIDE / height);
@@ -107,6 +149,7 @@
         context.fillRect(0, 0, canvas.width, canvas.height);
       }
       context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      const normalizedVisualKey = visualDedupKeyFromCanvas(canvas) || visualKey;
       const outputMime = sourceMime === 'image/png' ? 'image/png' : 'image/jpeg';
       const outputBlob = await canvasToBlob(canvas, outputMime, 0.96);
       return {
@@ -114,7 +157,8 @@
         mime: outputMime,
         extension: extensionFromMime(outputMime),
         width: canvas.width,
-        height: canvas.height
+        height: canvas.height,
+        visualKey: normalizedVisualKey
       };
     } finally {
       bitmap.close();
@@ -218,7 +262,8 @@
         : `product:${asset.itemKey || asset.itemId || asset.itemUrl || ''}`;
       const keys = [
         imageDedupKey(asset.url) ? `url:${imageDedupKey(asset.url)}` : '',
-        bytesDedupKey(asset.bytes)
+        bytesDedupKey(asset.bytes),
+        asset.visualKey || ''
       ].filter(Boolean);
       if (!keys.length) keys.push(`index:${asset.imageIndex || ''}`);
       const seen = seenByScope.get(scope) || new Set();

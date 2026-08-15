@@ -27,6 +27,7 @@
   let screenParent = 'home';
   let currentPageType = '';
   let storeDataReady = false;
+  let currentItemStatus = { exists: false, item: null };
   let currentStoreStatus = { exists: false, profile: null };
   let pendingCurrentItems = [];
   let pendingCurrentSourceUrl = '';
@@ -44,7 +45,7 @@
   const SCREEN_META = {
     home: { kicker: 'WORKSPACE', title: '闲鱼研究助手', subtitle: '从公开详情页整理同行商品与店铺信息' },
     detail: { kicker: 'CURRENT DETAIL', title: '采集当前详情', subtitle: '读取此刻打开的商品详情页' },
-    store: { kicker: 'CURRENT STORE', title: '采集当前店铺评价', subtitle: '读取店铺资料与公开评价图片' },
+    store: { kicker: 'CURRENT STORE', title: '采集当前店铺数据', subtitle: '读取评价，或采集店铺全部商品详情' },
     links: { kicker: 'BATCH INPUT', title: '批量商品链接', subtitle: '自动逐个打开商品详情页' },
     search: { kicker: 'SEARCH CRAWL', title: '搜索跨页采集', subtitle: '按页码推进，并逐个进入详情页' },
     data: { kicker: 'LOCAL DATASET', title: '数据中心', subtitle: '查看记录、下载 Excel 和真实图片' },
@@ -170,6 +171,7 @@
       commitButton.textContent = currentItemsCommitted ? '已加入数据中心商品表' : '加到数据中心商品表';
     }
     if (exportButton) exportButton.disabled = !hasItems;
+    renderDetailStatus(currentPageType, currentItemStatus);
     if (hint && !hasItems) {
       hint.textContent = '采集完成后可以选择：加入数据中心商品总表，或只导出当前这一条商品。';
     }
@@ -179,8 +181,39 @@
     pendingCurrentItems = [];
     pendingCurrentSourceUrl = '';
     currentItemsCommitted = false;
+    currentItemStatus = { exists: false, item: null };
     setCollectionSuccess('detail', false);
     renderCurrentResultActions();
+  }
+
+  function renderDetailStatus(pageType, status = {}) {
+    currentItemStatus = status || { exists: false, item: null };
+    const collectButton = $('collectButton');
+    const state = $('currentState');
+    const hint = $('currentCollectHint');
+    if (!collectButton || pageType !== 'detail') {
+      if (collectButton && pageType !== 'detail') collectButton.textContent = '采集当前详情页';
+      return;
+    }
+
+    if (pendingCurrentItems.length) {
+      collectButton.textContent = '重新采集当前详情页';
+      if (state) state.textContent = '本次已采集';
+      if (hint && !hint.textContent.includes('请选择')) {
+        hint.textContent = '本次详情页结果已暂存；再次点击“重新采集当前详情页”会重新读取当前页面，不会直接使用历史结果。';
+      }
+      return;
+    }
+
+    if (currentItemStatus.exists) {
+      collectButton.textContent = '重新采集当前详情页';
+      if (state) state.textContent = '历史已采集';
+      if (hint) hint.textContent = '当前商品已有历史采集记录；点击“重新采集当前详情页”会重新读取当前页面，不会用历史记录代替本次采集。';
+      return;
+    }
+
+    collectButton.textContent = '采集当前详情页';
+    if (state) state.textContent = '可采集';
   }
 
   function clearCurrentStoreResult() {
@@ -210,6 +243,7 @@
     currentStoreStatus = status || { exists: false, profile: null };
     const isAccount = pageType === 'account';
     const profile = currentStoreStatus.profile || null;
+    const hasStoreHistory = Boolean(currentStoreStatus.exists || currentStoreStatus.historyExists);
     const reviewCount = Number(profile?.reviewCount || 0);
     const collectedAt = profile?.collectedAt ? formatDate(profile.collectedAt) : '';
     const collectButton = $('storeCollectButton');
@@ -241,7 +275,7 @@
       if (hint) {
         hint.textContent = `本次已读取 ${pendingReviewCount} 条评价，结果已暂存；可以直接下载店铺 Excel，也可以点击“加到数据中心店铺表”。`;
       }
-    } else if (currentStoreStatus.exists) {
+    } else if (hasStoreHistory) {
       $('storeCurrentState').textContent = `历史已采集 · ${reviewCount} 条评价`;
       if (collectButton) collectButton.textContent = '重新采集当前店铺评价';
       if (hint) hint.textContent = `已找到当前店铺的历史记录：${reviewCount} 条评价${collectedAt ? `，最近采集于 ${collectedAt}` : ''}。重新采集会先生成本次结果，确认后再加入店铺表。`;
@@ -600,6 +634,10 @@
       $('storePageTitle').textContent = page?.title || activeTab.title || activeTab.url;
       $('storePageUrl').textContent = page?.url || activeTab.url;
       $('storePageType').textContent = page?.pageType === 'account' ? '店铺页' : page?.pageType === 'detail' ? '详情页' : '搜索页';
+      const itemStatus = page?.pageType === 'detail'
+        ? await sendRuntime({ type: 'GET_ITEM_STATUS', itemUrl: page.url || activeTab.url }).catch(() => ({ exists: false, item: null }))
+        : { exists: false, item: null };
+      renderDetailStatus(page?.pageType || '', itemStatus);
       const storeStatus = page?.pageType === 'account'
         ? await sendRuntime({ type: 'GET_STORE_STATUS', sellerUrl: page.url || activeTab.url }).catch(() => ({ exists: false, profile: null }))
         : { exists: false, profile: null };
@@ -1069,7 +1107,7 @@
   async function collectCurrentStorePage() {
     if (!activeTab?.id) return;
     const button = $('storeCollectButton');
-    const hadHistory = Boolean(currentStoreStatus?.exists);
+    const hadHistory = Boolean(currentStoreStatus?.exists || currentStoreStatus?.historyExists);
     clearCurrentStoreResult();
     button.disabled = true;
     button.textContent = '正在加载全部公开评价…';
@@ -1476,6 +1514,34 @@
     setStatus('当前数据已清空，历史任务仍然保留。', 'success');
   }
 
+  async function clearTasks() {
+    if (!taskJobs.length) {
+      setStatus('任务中心目前没有可清空的任务。', 'warning');
+      return;
+    }
+    if (!confirm('确定清空全部任务吗？正在运行或暂停的任务会被停止并关闭采集标签页；历史记录和数据中心不会删除。')) return;
+    const button = $('clearTasksButton');
+    if (button) {
+      button.disabled = true;
+      button.textContent = '正在清空…';
+    }
+    try {
+      const response = await sendRuntime({ type: 'CLEAR_JOBS' });
+      if (!response?.ok) throw new Error(response?.error || '清空任务失败');
+      selectedTaskId = '';
+      currentTaskJob = null;
+      await refreshTasks();
+      setStatus(`已清空 ${response.cleared || 0} 个任务；历史记录和数据中心未受影响。`, 'success');
+    } catch (error) {
+      setStatus(error.message || '清空任务失败。', 'error');
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = '清空全部任务';
+      }
+    }
+  }
+
   function formatDate(value) {
     const time = Date.parse(value || '');
     if (!time) return '时间未知';
@@ -1495,7 +1561,9 @@
     if (!response?.ok) throw new Error(response?.error || '读取历史失败');
     const list = $('historyList');
     list.replaceChildren();
-    const history = Array.isArray(response.history) ? response.history.slice(0, 8) : [];
+    const history = Array.isArray(response.history) ? response.history : [];
+    const historyCount = $('historyCountText');
+    if (historyCount) historyCount.textContent = `${history.length} 条历史记录`;
     if (!history.length) {
       const empty = document.createElement('p');
       empty.className = 'empty-state';
@@ -1558,6 +1626,35 @@
     setStatus('历史任务已删除。', 'success');
   }
 
+  async function clearHistory() {
+    const response = await sendRuntime({ type: 'GET_HISTORY' });
+    if (!response?.ok) throw new Error(response?.error || '读取历史失败');
+    const history = Array.isArray(response?.history) ? response.history : [];
+    if (!history.length) {
+      setStatus('目前没有可清空的历史记录。', 'warning');
+      return;
+    }
+    if (!confirm('确定清空全部采集历史吗？这不会删除数据中心商品表、店铺表，也不会影响正在运行的任务。')) return;
+    const button = $('clearHistoryButton');
+    if (button) {
+      button.disabled = true;
+      button.textContent = '正在清空…';
+    }
+    try {
+      const cleared = await sendRuntime({ type: 'CLEAR_HISTORY' });
+      if (!cleared?.ok) throw new Error(cleared?.error || '清空历史失败');
+      await refreshHistory();
+      setStatus(`已清空 ${history.length} 条历史记录；数据中心和任务未受影响。`, 'success');
+    } catch (error) {
+      setStatus(error.message || '清空历史失败。', 'error');
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = '清空全部历史';
+      }
+    }
+  }
+
   async function loadSettings() {
     const response = await sendRuntime({ type: 'GET_SETTINGS' });
     if (!response?.ok) throw new Error(response?.error || '读取设置失败');
@@ -1613,6 +1710,7 @@
       if (currentTaskJob) toggleTask(currentTaskJob).catch(error => setStatus(error.message, 'error'));
     });
     $('refreshTasksButton')?.addEventListener('click', () => refreshTasks().catch(error => setStatus(error.message, 'error')));
+    $('clearTasksButton')?.addEventListener('click', () => clearTasks().catch(error => setStatus(error.message, 'error')));
     $('copyFailedLinksButton')?.addEventListener('click', () => copyFailedLinks().catch(error => setStatus(error.message, 'error')));
     $('exportButton').addEventListener('click', () => exportItems($('exportButton')).catch(error => setStatus(error.message, 'error')));
     $('storeDataExportButton').addEventListener('click', () => exportItems($('storeDataExportButton')).catch(error => setStatus(error.message, 'error')));
@@ -1620,6 +1718,7 @@
     $('taskCommitButton').addEventListener('click', () => commitTaskResult().catch(error => setStatus(error.message, 'error')));
     $('taskDataButton').addEventListener('click', () => { setDataTab('products'); showScreen('data'); });
     $('clearButton').addEventListener('click', () => clearItems().catch(error => setStatus(error.message, 'error')));
+    $('clearHistoryButton')?.addEventListener('click', () => clearHistory().catch(error => setStatus(error.message, 'error')));
     $('dataProductsTab').addEventListener('click', () => setDataTab('products'));
     $('dataStoresTab').addEventListener('click', () => setDataTab('stores'));
     document.querySelectorAll('[data-open-data-tab]').forEach(button => {

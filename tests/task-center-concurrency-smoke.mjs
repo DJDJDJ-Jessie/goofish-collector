@@ -7,6 +7,7 @@ const LEGACY_JOB_KEY = 'xianyu_collect_job_v1';
 const storage = new Map();
 const messageListeners = [];
 const tabUpdates = [];
+const filenameListeners = [];
 
 function event(listeners) {
   return {
@@ -98,6 +99,7 @@ const chrome = {
     }
   },
   downloads: {
+    onDeterminingFilename: event(filenameListeners),
     download(_options, callback) {
       callback(1);
     }
@@ -144,9 +146,17 @@ const context = vm.createContext({
 
 const source = fs.readFileSync(new URL('../background.js', import.meta.url), 'utf8');
 vm.runInContext(
-  `${source}\n;globalThis.__taskCenterTestApi = { writeJob, readJobs, readJob, jobLinkUrl, jobLinkItemId, collectedItemForLink, advanceLinkJob, downloadFileName, exportTimestamp };`,
+  `${source}\n;globalThis.__taskCenterTestApi = { writeJob, readJobs, readJob, jobLinkUrl, jobLinkItemId, collectedItemForLink, advanceLinkJob, downloadFileName, exportTimestamp, rememberDownloadName, clearAllJobs };`,
   context
 );
+
+assert.equal(filenameListeners.length, 1, 'downloads filename override listener must be registered');
+context.__taskCenterTestApi.rememberDownloadName('blob:test-export', '研究导出/商品20260815-1251.xlsx');
+let suggestedFilename = '';
+filenameListeners[0]({ url: 'blob:test-export' }, suggestion => {
+  suggestedFilename = suggestion?.filename || '';
+});
+assert.equal(suggestedFilename, '研究导出/商品20260815-1251.xlsx', 'download filename override must preserve the business filename');
 
 assert.equal(
   context.__taskCenterTestApi.exportTimestamp(new Date('2026-08-15T12:51:00+08:00')),
@@ -315,8 +325,13 @@ const storedStoreJob = jobs.find(job => job.id === storeProductsJob.id);
 assert.equal(storedStoreJob?.stagedItems?.length, 1, 'store-products staging must persist in the task center');
 assert.equal(storage.has(LEGACY_JOB_KEY), true, 'legacy primary task key remains available for migration');
 
+const clearCount = await context.__taskCenterTestApi.clearAllJobs();
+assert.ok(clearCount >= 1, 'clear all jobs must report the number of persisted jobs');
+assert.equal((await context.__taskCenterTestApi.readJobs()).length, 0, 'clear all jobs must remove every persisted task');
+
 console.log(JSON.stringify({
   ok: true,
-  taskCount: jobs.length,
-  stagedStoreProducts: storedStoreJob.stagedItems.length
+  taskCount: clearCount,
+  stagedStoreProducts: storedStoreJob.stagedItems.length,
+  filenameOverride: suggestedFilename
 }));

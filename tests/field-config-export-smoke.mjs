@@ -123,6 +123,30 @@ if ((singleDrawing.match(/<xdr:oneCellAnchor>/g) || []).length !== 1) {
   throw new Error('a single logical product image must be embedded once');
 }
 
+const visualDuplicateAssets = singleImageItem.images.map((_url, index) => ({
+  kind: 'product',
+  itemKey: `id:${singleImageItem.itemId}`,
+  itemId: singleImageItem.itemId,
+  itemUrl: singleImageItem.itemUrl,
+  imageIndex: index + 1,
+  url: `https://img.example/visual-variant-${index + 1}.jpg`,
+  fileName: `visual-${index + 1}.jpg`,
+  bytes: index === 0 ? png : png2,
+  visualKey: 'visual:32:same-image',
+  extension: 'jpg',
+  width: 1,
+  height: 1
+}));
+const visualSingleBlob = context.window.XianyuXlsx.createWorkbook([singleImageItem], visualDuplicateAssets, [], {
+  fieldConfig: { product: ['itemId', 'images', 'sellerName'] }
+});
+const visualSingleEntries = readStoredZip(new Uint8Array(await visualSingleBlob.arrayBuffer()));
+const visualSingleSheetXml = new TextDecoder().decode(visualSingleEntries.get('xl/worksheets/sheet1.xml'));
+const visualSingleDrawing = new TextDecoder().decode(visualSingleEntries.get('xl/drawings/drawing1.xml'));
+if (visualSingleSheetXml.includes('商品图片2') || (visualSingleDrawing.match(/<xdr:oneCellAnchor>/g) || []).length !== 1) {
+  throw new Error('same visual image with different URLs and bytes must be deduped before workbook columns/drawings');
+}
+
 const sharedItems = [1, 2].map(index => ({
   ...item,
   itemId: `item-shared-image-${index}`,
