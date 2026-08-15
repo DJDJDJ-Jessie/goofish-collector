@@ -68,9 +68,48 @@ for (const header of ['商品ID', '商品文案', '商品图片', '商品图片2
 if (sheetXml.indexOf('商品文案') > sheetXml.indexOf('商品图片')) {
   throw new Error('configured product field order was not preserved');
 }
+if (!(sheetXml.indexOf('商品图片2') > sheetXml.indexOf('店铺名称'))) {
+  throw new Error('additional product images should be appended after the configured fields');
+}
 const drawing = new TextDecoder().decode(entries.get('xl/drawings/drawing1.xml'));
 if ((drawing.match(/<xdr:oneCellAnchor>/g) || []).length !== 2) {
   throw new Error('both product images should be embedded in the product row');
 }
 
-console.log(JSON.stringify({ ok: true, productSheets: 2, embeddedProductImages: 2 }));
+const singleImageItem = {
+  ...item,
+  itemId: 'item-single-image',
+  itemUrl: 'https://www.goofish.com/item?id=item-single-image',
+  images: [
+    'https://img.example/single_300x300.jpg',
+    'https://img.example/single_800x800.jpg',
+    'https://img.example/single.jpg?width=1200&quality=80'
+  ]
+};
+const duplicateAssets = singleImageItem.images.map((url, index) => ({
+  kind: 'product',
+  itemKey: `id:${singleImageItem.itemId}`,
+  itemId: singleImageItem.itemId,
+  itemUrl: singleImageItem.itemUrl,
+  imageIndex: index + 1,
+  url,
+  fileName: `single-${index + 1}.jpg`,
+  bytes: png,
+  extension: 'jpg',
+  width: 1,
+  height: 1
+}));
+const singleBlob = context.window.XianyuXlsx.createWorkbook([singleImageItem], duplicateAssets, [], {
+  fieldConfig: { product: ['itemId', 'images', 'sellerName'] }
+});
+const singleEntries = readStoredZip(new Uint8Array(await singleBlob.arrayBuffer()));
+const singleSheetXml = new TextDecoder().decode(singleEntries.get('xl/worksheets/sheet1.xml'));
+const singleDrawing = new TextDecoder().decode(singleEntries.get('xl/drawings/drawing1.xml'));
+if ((singleSheetXml.match(/商品图片/g) || []).length !== 1 || singleSheetXml.includes('商品图片2')) {
+  throw new Error('a single logical product image must not become repeated image columns');
+}
+if ((singleDrawing.match(/<xdr:oneCellAnchor>/g) || []).length !== 1) {
+  throw new Error('a single logical product image must be embedded once');
+}
+
+console.log(JSON.stringify({ ok: true, productSheets: 2, embeddedProductImages: 2, dedupedSingleImage: true }));

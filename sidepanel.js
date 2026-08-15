@@ -45,7 +45,7 @@
   const SCREEN_META = {
     home: { kicker: 'WORKSPACE', title: '闲鱼研究助手', subtitle: '从公开详情页整理同行商品与店铺信息' },
     detail: { kicker: 'CURRENT DETAIL', title: '采集当前详情', subtitle: '读取此刻打开的商品详情页' },
-    store: { kicker: 'CURRENT STORE', title: '采集当前店铺页', subtitle: '分别读取店铺资料与店铺评价图片' },
+    store: { kicker: 'CURRENT STORE', title: '采集当前店铺评价', subtitle: '读取店铺资料与公开评价图片' },
     links: { kicker: 'BATCH INPUT', title: '批量商品链接', subtitle: '自动逐个打开商品详情页' },
     search: { kicker: 'SEARCH CRAWL', title: '搜索跨页采集', subtitle: '按页码推进，并逐个进入详情页' },
     data: { kicker: 'LOCAL DATASET', title: '数据中心', subtitle: '查看记录、下载 Excel 和真实图片' },
@@ -152,6 +152,15 @@
     node.className = `status ${kind}`.trim();
   }
 
+  function setCollectionSuccess(type, visible, summary = '') {
+    const isStore = type === 'store';
+    const card = $(isStore ? 'storeSuccessCard' : 'detailSuccessCard');
+    const summaryNode = $(isStore ? 'storeSuccessSummary' : 'detailSuccessSummary');
+    if (!card) return;
+    card.classList.toggle('is-hidden', !visible);
+    if (summary && summaryNode) summaryNode.textContent = summary;
+  }
+
   function renderCurrentResultActions() {
     const hasItems = pendingCurrentItems.length > 0;
     const commitButton = $('currentCommitButton');
@@ -171,6 +180,7 @@
     pendingCurrentItems = [];
     pendingCurrentSourceUrl = '';
     currentItemsCommitted = false;
+    setCollectionSuccess('detail', false);
     renderCurrentResultActions();
   }
 
@@ -178,6 +188,7 @@
     pendingCurrentStoreProfile = null;
     pendingCurrentStoreSourceUrl = '';
     currentStoreCommitted = false;
+    setCollectionSuccess('store', false);
     renderStoreStatus(currentPageType, currentStoreStatus);
   }
 
@@ -219,7 +230,7 @@
 
     if (!isAccount) {
       $('storeCurrentState').textContent = '请进入店铺页';
-      if (collectButton) collectButton.textContent = '采集当前店铺页';
+      if (collectButton) collectButton.textContent = '采集当前店铺评价';
       if (hint) hint.textContent = '请先打开闲鱼卖家账号页；采集完成后会在这里直接显示结果和下载入口。';
       return;
     }
@@ -227,17 +238,17 @@
     if (hasPendingStore) {
       const pendingReviewCount = Number(pendingCurrentStoreProfile?.reviewCountLoaded || pendingCurrentStoreProfile?.reviews?.length || 0);
       $('storeCurrentState').textContent = `${currentStoreCommitted ? '已加入数据中心' : '本次已采集'} · ${pendingReviewCount} 条评价`;
-      if (collectButton) collectButton.textContent = '重新采集当前店铺页';
+      if (collectButton) collectButton.textContent = '重新采集当前店铺评价';
       if (hint) {
         hint.textContent = `本次已读取 ${pendingReviewCount} 条评价，结果已暂存；可以直接下载店铺 Excel，也可以点击“加到数据中心店铺表”。`;
       }
     } else if (currentStoreStatus.exists) {
       $('storeCurrentState').textContent = `历史已采集 · ${reviewCount} 条评价`;
-      if (collectButton) collectButton.textContent = '重新采集当前店铺页';
+      if (collectButton) collectButton.textContent = '重新采集当前店铺评价';
       if (hint) hint.textContent = `已找到当前店铺的历史记录：${reviewCount} 条评价${collectedAt ? `，最近采集于 ${collectedAt}` : ''}。重新采集会先生成本次结果，确认后再加入店铺表。`;
     } else {
       $('storeCurrentState').textContent = '可采集 · 暂无历史记录';
-      if (collectButton) collectButton.textContent = '采集当前店铺页';
+      if (collectButton) collectButton.textContent = '采集当前店铺评价';
       if (hint) hint.textContent = '当前店铺还没有本地采集记录；点击采集后会在这里显示完成状态、评价数量和下载入口。';
     }
   }
@@ -675,12 +686,18 @@
   }
 
   function jobFailureRecords(job) {
-    if (Array.isArray(job?.failureRecords)) return job.failureRecords;
-    return [
+    const records = Array.isArray(job?.failureRecords) ? job.failureRecords : [
       ...(Array.isArray(job?.failures) ? job.failures.map(entry => ({ ...entry, stage: entry.stage || 'detail-page' })) : []),
       ...(Array.isArray(job?.sellerFailures) ? job.sellerFailures.map(entry => ({ ...entry, stage: entry.stage || 'seller-profile', url: entry.url || entry.itemUrl || '' })) : []),
       ...(Array.isArray(job?.qualityWarnings) ? job.qualityWarnings.map(entry => ({ ...entry, stage: entry.stage || 'field-quality', url: entry.url || entry.itemUrl || '' })) : [])
     ];
+    return records.map(record => {
+      const rawUrl = record.url || record.itemUrl || record.sellerUrl || '';
+      const url = rawUrl && typeof rawUrl === 'object'
+        ? (rawUrl.itemUrl || rawUrl.url || '')
+        : rawUrl;
+      return { ...record, url: String(url || '') };
+    });
   }
 
   function renderTaskFailures(job) {
@@ -973,10 +990,11 @@
               if (enrichment.enriched) enrichedCount += 1;
             }
           } catch (_) {
-            // 商品详情结果仍然保留；店铺补充失败时提示用户用“当前店铺页”完整采集。
+            // 商品详情结果仍然保留；店铺补充失败时提示用户用“当前店铺评价”完整采集。
           }
         }
         renderCurrentResultActions();
+        setCollectionSuccess('detail', true, `当前详情页已完成 ${count} 条商品结果${enrichedCount ? `，并补充了 ${enrichedCount} 个店铺基础资料` : ''}。下面可以加入商品表或单独导出。`);
         $('currentCollectHint').textContent = `当前详情页采集完成：${count} 条商品结果已暂存${enrichedCount ? `，已补充 ${enrichedCount} 个店铺基础资料` : ''}。请选择“加到数据中心商品表”或“导出当前详情页”；完整店铺评价请单独进入店铺页采集。`;
         setStatus(`当前详情页采集完成：${count} 条结果已暂存${enrichedCount ? `，店铺资料已补充 ${enrichedCount} 个` : ''}，等待你选择加入总表或单独导出。`, 'success');
       }
@@ -1054,10 +1072,11 @@
     if (!activeTab?.id) return;
     const button = $('storeCollectButton');
     const hadHistory = Boolean(currentStoreStatus?.exists);
+    clearCurrentStoreResult();
     button.disabled = true;
     button.textContent = '正在加载全部公开评价…';
     $('storeCollectHint').textContent = '正在读取店铺资料并滚动评价区域，请保持当前店铺页打开。';
-    setStatus('正在采集当前店铺页的公开资料、评价和评价图片…');
+    setStatus('正在采集当前店铺评价、店铺资料和评价图片…');
 
     try {
       const page = await sendToTabWithRecovery(activeTab.id, { type: 'GET_PAGE_INFO' });
@@ -1074,14 +1093,15 @@
       currentStoreCommitted = false;
       const reviewCount = Number(result.reviewCount || result.reviewCountLoaded || result.reviews?.length || 0);
       renderStoreStatus('account', currentStoreStatus);
-      setStatus(`${hadHistory ? '当前店铺页重新采集完成' : '当前店铺页首次采集完成'}：本次暂存 1 份店铺资料，读取 ${reviewCount} 条公开评价；现在可以直接下载或加入店铺表。`, 'success');
+      setCollectionSuccess('store', true, `${hadHistory ? '已完成一次历史更新' : '已完成首次采集'}：读取 ${reviewCount} 条公开评价，评价图片会随店铺评价表一起导出。`);
+      setStatus(`${hadHistory ? '当前店铺评价重新采集完成' : '当前店铺评价首次采集完成'}：本次暂存 1 份店铺资料，读取 ${reviewCount} 条公开评价；现在可以直接下载或加入店铺表。`, 'success');
       $('storeCollectHint').textContent = `本次已读取 ${reviewCount} 条评价，结果已暂存。下载文件包含“店铺资料”和“店铺评价综合”两张表，评价图片会嵌入对应评价行；可以直接下载，也可以加入数据中心店铺表。`;
     } catch (error) {
       setStatus(error.message || '店铺页采集失败，请刷新账号页后重试。', 'error');
       $('storeCollectHint').textContent = '如果评价区仍在加载，请停留几秒后重试。';
     } finally {
       button.disabled = false;
-      button.textContent = '采集当前店铺页';
+      button.textContent = pendingCurrentStoreProfile ? '重新采集当前店铺评价' : '采集当前店铺评价';
       await refreshCurrentPage().catch(() => {});
       renderStoreStatus(currentPageType, currentStoreStatus);
     }

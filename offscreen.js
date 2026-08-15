@@ -142,6 +142,35 @@
     return [...new Set(values)];
   }
 
+  function imageDedupKey(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    try {
+      const parsed = new URL(raw);
+      for (const key of [...parsed.searchParams.keys()]) {
+        if (/resize|width|height|quality|thumbnail|thumb|process|imageview|crop|format/i.test(key)) {
+          parsed.searchParams.delete(key);
+        }
+      }
+      parsed.pathname = parsed.pathname.replace(/([_-])\d{2,5}x\d{2,5}(?=\.[a-z\d]{2,6}$)/i, '');
+      return parsed.href;
+    } catch (_) {
+      return raw.replace(/([_-])\d{2,5}x\d{2,5}(?=\.[a-z\d]{2,6}(?:[?#]|$))/i, '');
+    }
+  }
+
+  function uniqueImageUrls(values) {
+    const seen = new Set();
+    return values
+      .map(value => String(value || '').trim())
+      .filter(value => {
+        const key = imageDedupKey(value) || value;
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  }
+
   async function downloadImage(sourceUrl) {
     let lastError = null;
     for (const candidate of imageCandidates(sourceUrl)) {
@@ -168,7 +197,7 @@
     const candidates = [];
 
     for (const item of needProductImages ? items : []) {
-      const urls = [...new Set((Array.isArray(item.images) ? item.images : []).filter(Boolean))];
+      const urls = uniqueImageUrls(Array.isArray(item.images) ? item.images : []);
       const selected = perItemLimit > 0 ? urls.slice(0, perItemLimit) : urls;
       selected.forEach((url, index) => candidates.push({
         kind: 'product',
@@ -181,7 +210,7 @@
 
     for (const profile of needReviewImages ? (Array.isArray(storeProfiles) ? storeProfiles : []) : []) {
       for (const review of Array.isArray(profile?.reviews) ? profile.reviews : []) {
-        const urls = [...new Set((Array.isArray(review?.images) ? review.images : []).filter(Boolean))];
+        const urls = uniqueImageUrls(Array.isArray(review?.images) ? review.images : []);
         urls.forEach((url, index) => candidates.push({
           kind: 'review',
           profile,
@@ -210,10 +239,11 @@
       while (cursor < jobs.length) {
         const index = cursor++;
         const job = jobs[index];
-        let imagePromise = cache.get(job.url);
+        const cacheKey = imageDedupKey(job.url) || job.url;
+        let imagePromise = cache.get(cacheKey);
         if (!imagePromise) {
           imagePromise = downloadImage(job.url).catch(error => ({ error: error?.message || String(error) }));
-          cache.set(job.url, imagePromise);
+          cache.set(cacheKey, imagePromise);
         }
         const image = await imagePromise;
         assets[index] = {

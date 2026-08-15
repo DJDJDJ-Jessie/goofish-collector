@@ -6,6 +6,7 @@ const JOBS_KEY = 'xianyu_collect_jobs_v2';
 const LEGACY_JOB_KEY = 'xianyu_collect_job_v1';
 const storage = new Map();
 const messageListeners = [];
+const tabUpdates = [];
 
 function event(listeners) {
   return {
@@ -61,8 +62,9 @@ const chrome = {
     get(_tabId, callback) {
       callback({ id: 77, url: 'https://www.goofish.com/item?id=store-item-1' });
     },
-    update(_tabId, _properties, callback) {
-      callback({ id: 77 });
+    update(_tabId, properties, callback) {
+      tabUpdates.push(properties?.url || '');
+      callback({ id: 77, url: properties?.url || '' });
     },
     remove(_tabId, callback) {
       callback();
@@ -142,9 +144,55 @@ const context = vm.createContext({
 
 const source = fs.readFileSync(new URL('../background.js', import.meta.url), 'utf8');
 vm.runInContext(
-  `${source}\n;globalThis.__taskCenterTestApi = { writeJob, readJobs };`,
+  `${source}\n;globalThis.__taskCenterTestApi = { writeJob, readJobs, readJob, jobLinkUrl, jobLinkItemId, collectedItemForLink, advanceLinkJob };`,
   context
 );
+
+assert.equal(
+  context.__taskCenterTestApi.jobLinkUrl({ itemId: 'object-link-1', itemUrl: 'https://www.goofish.com/item?id=object-link-1' }),
+  'https://www.goofish.com/item?id=object-link-1',
+  'store-products link objects must normalize to a string URL before navigation'
+);
+assert.equal(
+  context.__taskCenterTestApi.jobLinkItemId({ itemId: 'object-link-1', itemUrl: 'https://www.goofish.com/item?id=object-link-1' }),
+  'object-link-1',
+  'store-products link objects must keep their item id'
+);
+const matched = context.__taskCenterTestApi.collectedItemForLink({ items: [{
+  itemId: 'object-link-1',
+  itemUrl: 'https://www.goofish.com/item?id=object-link-1',
+  title: '店铺商品'
+}] }, { itemId: 'object-link-1', itemUrl: 'https://www.goofish.com/item?id=object-link-1' });
+assert.equal(matched?.title, '店铺商品', 'detail results must match a normalized store-products link object');
+
+const objectNavigationJob = {
+  id: 'store-products-navigation',
+  type: 'store-products',
+  status: 'collecting',
+  stage: 'detail-page',
+  tabId: 88,
+  links: [
+    { itemId: 'navigation-1', itemUrl: 'https://www.goofish.com/item?id=navigation-1' },
+    { itemId: 'navigation-2', itemUrl: 'https://www.goofish.com/item?id=navigation-2' }
+  ],
+  index: 0,
+  collected: 0,
+  visited: 0,
+  failures: [],
+  sellerFailures: [],
+  qualityWarnings: [],
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString()
+};
+await context.__taskCenterTestApi.writeJob(objectNavigationJob);
+const advancedObjectJob = await context.__taskCenterTestApi.advanceLinkJob(objectNavigationJob, '详情页等待超时');
+assert.equal(
+  tabUpdates.at(-1),
+  'https://www.goofish.com/item?id=navigation-2',
+  'store-products navigation must pass the object itemUrl string to tabs.update'
+);
+assert.equal(advancedObjectJob.failures?.[0]?.url, 'https://www.goofish.com/item?id=navigation-1');
+assert.equal(advancedObjectJob.failures?.[0]?.itemId, 'navigation-1');
 
 const now = new Date().toISOString();
 const firstJob = {
@@ -178,8 +226,8 @@ await Promise.all([
 let jobs = await context.__taskCenterTestApi.readJobs();
 assert.deepEqual(
   new Set(jobs.map(job => job.id)),
-  new Set(['parallel-first', 'parallel-second']),
-  'concurrent task updates must not overwrite another task'
+  new Set(['parallel-first', 'parallel-second', 'store-products-navigation']),
+  'concurrent task updates must not overwrite another task or navigation regression fixture'
 );
 
 const storeProductsJob = {

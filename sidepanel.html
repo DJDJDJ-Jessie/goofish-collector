@@ -66,7 +66,7 @@
               </button>
               <button class="menu-row" type="button" data-open-screen="store">
                 <span class="row-icon orange">◎</span>
-                <span class="row-copy"><strong>采集当前店铺页</strong><small>店铺资料单独一表，评价和图片合并一表</small></span>
+                <span class="row-copy"><strong>采集当前店铺评价</strong><small>店铺资料单独一表，评价和图片合并一表</small></span>
                 <span class="row-chevron">›</span>
               </button>
               <button class="menu-row" type="button" data-open-screen="links">
@@ -139,7 +139,7 @@
           <section class="page-intro">
             <span class="intro-label">CURRENT DETAIL</span>
             <h2>采集当前商品详情</h2>
-            <p>读取当前商品详情，并自动补充卖家店铺的基础公开资料；完整店铺评价和评价图片仍通过“采集当前店铺页”单独获取。</p>
+            <p>读取当前商品详情，并自动补充卖家店铺的基础公开资料；完整店铺评价和评价图片仍通过“采集当前店铺评价”单独获取。</p>
           </section>
 
           <section class="context-card detail-context-card" aria-live="polite">
@@ -150,6 +150,13 @@
             <h2 id="pageTitle">正在读取当前标签页…</h2>
             <p id="pageUrl" class="context-url">—</p>
             <div class="context-state"><span>当前状态</span><strong id="currentState">待检查</strong></div>
+          </section>
+
+          <section id="detailSuccessCard" class="collection-success-card is-hidden" aria-live="polite">
+            <span class="success-kicker">COLLECTION COMPLETE</span>
+            <div class="success-orb" aria-hidden="true"><span>✓</span></div>
+            <h3>采集完成</h3>
+            <p id="detailSuccessSummary">当前商品详情已暂存，可以选择加入商品表或单独导出。</p>
           </section>
 
           <section class="action-card">
@@ -166,7 +173,7 @@
         <section id="screen-store" class="screen" data-screen="store" aria-labelledby="screenTitle">
           <section class="page-intro">
             <span class="intro-label">CURRENT STORE</span>
-            <h2>采集当前店铺页</h2>
+            <h2>采集当前店铺评价</h2>
             <p>读取店铺公开资料，自动进入评价区域并尽量加载全部公开评价；导出为“店铺资料”和“店铺评价综合”两张表，评价图片直接嵌入对应评价行。</p>
           </section>
 
@@ -180,13 +187,20 @@
             <div class="context-state"><span>当前状态</span><strong id="storeCurrentState">待检查</strong></div>
           </section>
 
-            <section class="action-card">
-            <button id="storeCollectButton" class="button primary large" type="button">采集当前店铺页</button>
+          <section id="storeSuccessCard" class="collection-success-card is-hidden" aria-live="polite">
+            <span class="success-kicker">COLLECTION COMPLETE</span>
+            <div class="success-orb" aria-hidden="true"><span>✓</span></div>
+            <h3>采集完成</h3>
+            <p id="storeSuccessSummary">当前店铺评价已暂存，可以选择加入店铺表或直接下载。</p>
+          </section>
+
+          <section class="action-card">
+            <button id="storeCollectButton" class="button primary large" type="button">采集当前店铺评价</button>
             <button id="storeProductsButton" class="button primary large" type="button">采集店铺全部商品详情</button>
             <button id="storeCommitButton" class="button teal-action large" type="button" disabled>加到数据中心店铺表</button>
             <button id="storeExportButton" class="button teal-action large" type="button" disabled>立即下载店铺 Excel</button>
             <button id="storeDataButton" class="button outline-action" type="button">查看数据中心店铺表</button>
-            <p id="storeCollectHint" class="helper">“采集当前店铺页”读取店铺资料和全部公开评价；“采集店铺全部商品详情”会建立独立任务，逐个进入店铺商品详情页。</p>
+            <p id="storeCollectHint" class="helper">“采集当前店铺评价”读取店铺资料和全部公开评价；“采集店铺全部商品详情”会建立独立任务，逐个进入店铺商品详情页。</p>
           </section>
         </section>
 

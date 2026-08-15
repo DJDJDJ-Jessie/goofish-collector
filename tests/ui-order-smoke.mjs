@@ -86,6 +86,20 @@ if (!contentSource.includes("bodyText.includes('短信登录')") || !contentSour
 }
 
 const panelSource = await fs.readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+const panelHtml = await fs.readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
+const panelCss = await fs.readFile(new URL('../sidepanel.css', import.meta.url), 'utf8');
+if (!panelHtml.includes('id="detailSuccessCard"') || !panelHtml.includes('id="storeSuccessCard"')) {
+  throw new Error('current detail/store screens must have visible completion cards');
+}
+if (!panelSource.includes("setCollectionSuccess('detail', true") || !panelSource.includes("setCollectionSuccess('store', true")) {
+  throw new Error('current detail/store collection must show a completion state after success');
+}
+if (!panelCss.includes('.success-orb') || !panelCss.includes('.collection-success-card')) {
+  throw new Error('collection completion card styling is missing');
+}
+if (!panelHtml.includes('采集当前店铺评价') || panelSource.includes("textContent = '采集当前店铺页'")) {
+  throw new Error('store collection action should be named as current store reviews');
+}
 const panelBootStart = panelSource.indexOf("document.addEventListener('DOMContentLoaded'");
 if (panelBootStart < 0) throw new Error('sidepanel boot listener not found');
 const elements = new Map([

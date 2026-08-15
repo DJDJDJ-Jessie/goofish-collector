@@ -160,7 +160,7 @@
       wantCount: interactionCount(item.wantCount),
       price: item.price || '',
       category: item.category || '',
-      images: list(item.images),
+      images: uniqueImageUrls(list(item.images)),
       itemUrl: item.itemUrl || '',
       sellerName: item.sellerName || '',
       sellerUrl: item.sellerUrl || '',
@@ -188,6 +188,35 @@
     if (!match) return '';
     const number = Number(match[1]);
     return Number.isFinite(number) && number >= 0 && number <= 100 ? `${match[1]}%` : '';
+  }
+
+  function imageDedupKey(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    try {
+      const parsed = new URL(raw);
+      for (const key of [...parsed.searchParams.keys()]) {
+        if (/resize|width|height|quality|thumbnail|thumb|process|imageview|crop|format/i.test(key)) {
+          parsed.searchParams.delete(key);
+        }
+      }
+      parsed.pathname = parsed.pathname.replace(/([_-])\d{2,5}x\d{2,5}(?=\.[a-z\d]{2,6}$)/i, '');
+      return parsed.href;
+    } catch (_) {
+      return raw.replace(/([_-])\d{2,5}x\d{2,5}(?=\.[a-z\d]{2,6}(?:[?#]|$))/i, '');
+    }
+  }
+
+  function uniqueImageUrls(values) {
+    const seen = new Set();
+    return values
+      .map(value => String(value || '').trim())
+      .filter(value => {
+        const key = imageDedupKey(value) || value;
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
   }
 
   function interactionCount(value) {
@@ -297,7 +326,7 @@
         role: review?.role || '',
         feedback: review?.feedback || '',
         timeIp: review?.timeIp || '',
-        images: Array.isArray(review?.images) ? review.images.filter(Boolean) : [],
+        images: uniqueImageUrls(Array.isArray(review?.images) ? review.images : []),
         collectedAt: review?.collectedAt || profile?.collectedAt || ''
       }))
     };
@@ -403,9 +432,16 @@
   }
 
   function imageAssetsByItem(productAssets, item) {
-    return productAssets
+    const seen = new Set();
+    const deduped = productAssets
       .filter(asset => (asset.itemKey || itemKey(asset)) === itemKey(item))
       .sort((first, second) => Number(first.imageIndex || 0) - Number(second.imageIndex || 0));
+    return deduped.filter(asset => {
+      const key = imageDedupKey(asset.url) || `${itemKey(item)}|${asset.imageIndex || ''}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).map((asset, index) => ({ ...asset, imageIndex: index + 1 }));
   }
 
   function imageStatusText(item, assets) {
@@ -467,12 +503,13 @@
 
     const productHeaders = [];
     for (const fieldId of productFieldIds) {
-      if (fieldId === 'images') {
-        for (let index = 1; index <= productImageSlots; index += 1) {
-          productHeaders.push(index === 1 ? '商品图片' : `商品图片${index}`);
-        }
-      } else {
-        productHeaders.push(fieldLabel('product', fieldId));
+      productHeaders.push(fieldId === 'images' ? '商品图片' : fieldLabel('product', fieldId));
+    }
+    // 主图跟随用户选择的“商品图片”字段；其余图片统一追加到表格末尾。
+    // 这样不同商品图片数量不同时，不会把后面的商品字段视觉上挤成多组。
+    if (productImageEnabled) {
+      for (let index = 2; index <= productImageSlots; index += 1) {
+        productHeaders.push(`商品图片${index}`);
       }
     }
     const mainRows = [];
@@ -485,17 +522,26 @@
       let column = 0;
       for (const fieldId of productFieldIds) {
         if (fieldId === 'images') {
-          for (let imageIndex = 1; imageIndex <= productImageSlots; imageIndex += 1) {
-            const asset = assets.find(candidate => Number(candidate.imageIndex) === imageIndex);
-            row.push('');
-            if (asset?.bytes?.length) {
-              mainPlacements.push({ asset, row: itemIndex + 1, col: column });
-              mainRowHeights[itemIndex + 2] = Math.max(mainRowHeights[itemIndex + 2] || 0, 96);
-            }
-            column += 1;
+          const asset = assets.find(candidate => Number(candidate.imageIndex) === 1);
+          row.push('');
+          if (asset?.bytes?.length) {
+            mainPlacements.push({ asset, row: itemIndex + 1, col: column });
+            mainRowHeights[itemIndex + 2] = Math.max(mainRowHeights[itemIndex + 2] || 0, 96);
           }
+          column += 1;
         } else {
           row.push(productFieldValue(item, fieldId, assets));
+          column += 1;
+        }
+      }
+      if (productImageEnabled) {
+        for (let imageIndex = 2; imageIndex <= productImageSlots; imageIndex += 1) {
+          const asset = assets.find(candidate => Number(candidate.imageIndex) === imageIndex);
+          row.push('');
+          if (asset?.bytes?.length) {
+            mainPlacements.push({ asset, row: itemIndex + 1, col: column });
+            mainRowHeights[itemIndex + 2] = Math.max(mainRowHeights[itemIndex + 2] || 0, 96);
+          }
           column += 1;
         }
       }
@@ -581,7 +627,7 @@
 
     const notes = [
       ['项目', '说明'],
-      ['商品主表', '商品图片已经与商品字段放在同一张商品数据表中；同一商品的多张图片按“商品图片、商品图片2、商品图片3…”展开，不再生成图片索引表。'],
+      ['商品主表', '商品图片已经与商品字段放在同一张商品数据表中；主图保留在“商品图片”列，真实多图的“商品图片2、商品图片3…”统一追加到表格最后；同一逻辑图片不会重复嵌入，不再生成图片索引表。'],
       ['字段配置', `本次商品表字段：${productHeaders.join('、')}；店铺资料字段：${storeProfileHeaders.join('、')}；店铺评价字段：${storeReviewHeaders.join('、')}。字段选择和顺序在插件“设置”中统一保存。`],
       ['图片处理', '导出时会下载图片并将真实图片二进制嵌入 Excel；商品图片和评价图片分别按设置处理，失败会在图片状态字段中说明原因，不会用 URL 冒充图片本身。'],
       ['店铺表', '店铺资料和店铺评价仍是两张表：店铺资料一店一行，店铺评价综合一条评价一行，评价图片与评价文本保持同一行。店铺页无法可靠提供开店时长和商品好评率，因此不生成这两个字段。'],

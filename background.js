@@ -1283,10 +1283,29 @@ function collectedItemForLink(result, link) {
     ...(Array.isArray(result?.items) ? result.items : []),
     ...(Array.isArray(result?.stagedItems) ? result.stagedItems : [])
   ];
-  const itemId = cleanText(link?.itemId, 200);
+  const itemId = jobLinkItemId(link);
+  const linkUrl = jobLinkUrl(link);
   const exact = items.find(item => itemId && cleanText(item?.itemId, 200) === itemId)
-    || items.find(item => cleanUrl(item?.itemUrl || '') === cleanUrl(link?.itemUrl || ''));
+    || items.find(item => linkUrl && cleanUrl(item?.itemUrl || '') === linkUrl);
   return exact || items[0] || null;
+}
+
+// 链接批量任务保存的是字符串，店铺全部商品任务为了保留标题/卖家等
+// 发现信息保存的是对象。所有导航和失败记录必须先经过这一层归一化，
+// 不能把对象直接传给 tabs.update，否则会得到 url expected string。
+function jobLinkUrl(value) {
+  const rawCandidate = typeof value === 'string'
+    ? value
+    : value && typeof value === 'object'
+      ? (value.itemUrl || value.url || '')
+      : '';
+  const candidate = typeof rawCandidate === 'string' ? rawCandidate : '';
+  return validItemUrl(candidate) || cleanUrl(candidate || '');
+}
+
+function jobLinkItemId(value) {
+  const explicit = value && typeof value === 'object' ? cleanText(value.itemId, 200) : '';
+  return explicit || itemIdFromUrl(jobLinkUrl(value));
 }
 
 async function prepareSellerEnrichment(job, item, pendingCount) {
@@ -1314,6 +1333,7 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
     const currentLink = ['links', 'store-products'].includes(job.type)
       ? job.links?.[job.index]
       : job.pageLinks?.[job.detailIndex];
+    const currentLinkUrl = jobLinkUrl(currentLink);
     return {
       kind: 'unavailable',
       job: appendQualityWarning({
@@ -1322,8 +1342,8 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
           ...(job.sellerFailures || []),
           {
             stage: 'seller-profile',
-            url: currentItem?.itemUrl || currentLink?.itemUrl || '',
-            itemId: currentItem?.itemId || currentLink?.itemId || '',
+            url: currentItem?.itemUrl || currentLinkUrl,
+            itemId: currentItem?.itemId || jobLinkItemId(currentLink),
             sellerUrl: '',
             error: '详情页未识别到可进入的卖家账号页，已保留商品结果；请记录此链接后补采店铺资料。'
           }
@@ -1489,11 +1509,13 @@ async function advanceLinkJob(job, failureMessage = '') {
   if (!(await canContinueJob(job))) return readJob();
   const nextIndex = Number(job.index || 0) + 1;
   const failures = [...(job.failures || [])];
-  if (failureMessage && job.links?.[job.index]) {
+  const currentLink = job.links?.[job.index];
+  const currentLinkUrl = jobLinkUrl(currentLink);
+  if (failureMessage && currentLinkUrl) {
     failures.push({
       stage: 'detail-page',
-      url: job.links[job.index],
-      itemId: itemIdFromUrl(job.links[job.index]),
+      url: currentLinkUrl,
+      itemId: jobLinkItemId(currentLink),
       error: failureMessage
     });
   }
@@ -1526,7 +1548,9 @@ async function advanceLinkJob(job, failureMessage = '') {
     if (!(await canContinueJob(next))) return readJob();
     await writeJob(waiting);
     if (!(await canContinueJob(waiting))) return readJob();
-    await tabsUpdate(job.tabId, { url: job.links[nextIndex] });
+    const nextLinkUrl = jobLinkUrl(job.links[nextIndex]);
+    if (!nextLinkUrl) return advanceLinkJob(next, '详情链接为空，无法打开该商品。');
+    await tabsUpdate(job.tabId, { url: nextLinkUrl });
     if (!(await canContinueJob(waiting))) return readJob();
     return scheduleJob(waiting, 'ready-to-collect', Math.max(1000, Number(job.delayMs) || 1400));
   } catch (error) {
@@ -1541,7 +1565,8 @@ async function processLinkJob(job) {
     if (pageInfo?.pageType !== 'detail') {
       throw new Error('自动打开后当前标签页不是商品详情页，未写入非详情页面数据。');
     }
-    const expectedUrl = job.links?.[job.index] || '';
+    const currentLink = job.links?.[job.index];
+    const expectedUrl = jobLinkUrl(currentLink);
     if (expectedUrl && !itemUrlsMatch(pageInfo.url, expectedUrl)) {
       throw new Error('当前详情页链接与待采集商品不一致，已等待页面重新导航。');
     }
@@ -1553,7 +1578,7 @@ async function processLinkJob(job) {
       resultKeys: [...new Set([...(job.resultKeys || []), ...(result.keys || [])])],
       retries: 0
     };
-    const detailItem = collectedItemForLink(result, { itemUrl: job.links?.[job.index] || '' });
+    const detailItem = collectedItemForLink(result, currentLink);
     const enrichment = await prepareSellerEnrichment(next, detailItem, count);
     if (enrichment.kind === 'cancelled') return enrichment.job;
     if (enrichment.kind === 'scheduled') return enrichment.job;
@@ -1603,7 +1628,9 @@ async function processStoreProductsPage(job) {
     };
     const waiting = jobMessage({ ...next, status: 'waiting-page' }, next.message);
     await writeJob(waiting);
-    await tabsUpdate(job.tabId, { url: links[0].itemUrl });
+    const firstLinkUrl = jobLinkUrl(links[0]);
+    if (!firstLinkUrl) throw new Error('店铺页发现了无效商品详情链接。');
+    await tabsUpdate(job.tabId, { url: firstLinkUrl });
     return scheduleJob(waiting, 'ready-to-collect', Math.max(1700, Number(job.delayMs) || 1800));
   } catch (error) {
     const retries = Number(job.retries || 0) + 1;
