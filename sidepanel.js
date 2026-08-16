@@ -750,7 +750,8 @@
       const stage = document.createElement('strong');
       stage.textContent = record.stage === 'seller-profile'
         ? '店铺资料补充失败'
-        : record.stage === 'field-quality' ? '字段待补充' : '商品详情采集失败';
+        : record.stage === 'store-discovery' ? '店铺商品发现不完整'
+          : record.stage === 'field-quality' ? '字段待补充' : '商品详情采集失败';
       const target = document.createElement('span');
       target.textContent = record.url || record.sellerUrl || record.itemId || '未提供链接';
       target.title = target.textContent;

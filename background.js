@@ -17,6 +17,9 @@ const MAX_STORE_REVIEWS = 1000;
 const MAX_HISTORY = 50;
 const TAB_MESSAGE_TIMEOUT_MS = 12000;
 const JOB_STALE_TIMEOUT_MS = 90000;
+const STORE_DISCOVERY_MESSAGE_TIMEOUT_MS = 78000;
+const DETAIL_SESSION_DEADLINE_MS = 45000;
+const DETAIL_SESSION_RENAVIGATE_EVERY = 2;
 const MAX_TASKS = 100;
 const cancelledJobIds = new Set();
 const pendingDownloadNames = new Map();
@@ -1349,6 +1352,124 @@ function jobLinkItemId(value) {
   return explicit || itemIdFromUrl(jobLinkUrl(value));
 }
 
+function createDetailSession(url) {
+  const normalizedUrl = jobLinkUrl(url);
+  const now = new Date().toISOString();
+  return {
+    id: `detail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    url: normalizedUrl,
+    startedAt: now,
+    attempts: 0,
+    reloads: 0,
+    lastError: ''
+  };
+}
+
+function ensureDetailSession(job, expectedUrl) {
+  const normalizedUrl = jobLinkUrl(expectedUrl);
+  const existing = job?.detailSession;
+  if (existing?.url === normalizedUrl && Date.parse(existing.startedAt || '') > 0) return job;
+  return {
+    ...job,
+    detailSession: createDetailSession(normalizedUrl)
+  };
+}
+
+function detailSessionElapsed(job) {
+  const startedAt = Date.parse(job?.detailSession?.startedAt || '');
+  return startedAt > 0 ? Math.max(0, Date.now() - startedAt) : 0;
+}
+
+function publicProductCountNumber(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const text = cleanText(value, 100).replace(/,/g, '');
+  const compact = text.match(/([\d]+(?:\.\d+)?)\s*(万|w)/i);
+  if (compact) {
+    const number = Number(compact[1]);
+    return Number.isFinite(number) && number >= 0 ? Math.round(number * 10000) : null;
+  }
+  const integer = text.match(/\d{1,9}/);
+  if (!integer) return null;
+  const number = Number(integer[0]);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function storeDiscoverySummary(result) {
+  const items = Array.isArray(result?.items) ? result.items : [];
+  const discoveredProductCount = Math.max(
+    0,
+    Number(result?.discoveredProductCount ?? result?.productCount ?? items.length) || 0
+  );
+  const publicProductCount = publicProductCountNumber(result?.publicProductCount);
+  const discoveryComplete = result?.discoveryComplete === true;
+  return {
+    publicProductCount,
+    discoveredProductCount,
+    discoveryComplete,
+    discoveryReason: cleanText(result?.discoveryReason || '', 100),
+    mismatch: publicProductCount !== null && discoveredProductCount < publicProductCount
+  };
+}
+
+function storeDiscoveryWarning(job, summary) {
+  if (!summary?.mismatch) return job;
+  const existing = Array.isArray(job?.qualityWarnings) ? job.qualityWarnings : [];
+  const warning = {
+    stage: 'store-discovery',
+    url: cleanUrl(job.storeUrl || ''),
+    itemId: '',
+    fields: ['店铺商品详情链接'],
+    error: `店铺公开商品数为 ${summary.publicProductCount}，最终只发现 ${summary.discoveredProductCount} 条商品详情链接。`
+  };
+  if (existing.some(entry => entry?.stage === warning.stage && entry?.url === warning.url)) return job;
+  return { ...job, qualityWarnings: [...existing, warning].slice(-100) };
+}
+
+async function retryDetailSession(job, expectedUrl, error) {
+  const normalizedJob = ensureDetailSession(job, expectedUrl);
+  const currentSession = normalizedJob.detailSession || createDetailSession(expectedUrl);
+  const attempts = Number(currentSession.attempts || 0) + 1;
+  const elapsed = detailSessionElapsed(normalizedJob);
+  const lastError = cleanText(error?.message || error || '详情页尚未稳定加载', 500);
+
+  if (elapsed >= DETAIL_SESSION_DEADLINE_MS) {
+    return advanceLinkJob({
+      ...normalizedJob,
+      detailSession: { ...currentSession, attempts, lastError }
+    }, `详情页在 ${Math.round(DETAIL_SESSION_DEADLINE_MS / 1000)} 秒内仍未稳定：${lastError}`);
+  }
+
+  let next = {
+    ...normalizedJob,
+    detailSession: { ...currentSession, attempts, lastError }
+  };
+  let message = `当前商品详情仍在加载，继续等待（已等待 ${Math.round(elapsed / 1000)} 秒）…`;
+
+  // 每隔两次稳定检查重新导航当前 URL，清掉单页应用残留状态；这仍然是
+  // 当前商品的同一详情会话，不会把失败直接推进到下一个商品。
+  if (attempts % DETAIL_SESSION_RENAVIGATE_EVERY === 0) {
+    try {
+      if (!(await canContinueJob(next))) return readJob(next.id);
+      await tabsUpdate(next.tabId, { url: normalizedJob.detailSession.url });
+      next = {
+        ...next,
+        detailSession: {
+          ...next.detailSession,
+          reloads: Number(next.detailSession.reloads || 0) + 1
+        }
+      };
+      message = `当前商品详情仍未稳定，已重新打开当前链接并继续等待（已等待 ${Math.round(elapsed / 1000)} 秒）…`;
+    } catch (navigationError) {
+      next.detailSession = {
+        ...next.detailSession,
+        lastError: `${lastError}；重新打开当前链接失败：${cleanText(navigationError?.message || navigationError, 300)}`
+      };
+    }
+  }
+
+  return scheduleJob(jobMessage({ ...next, status: 'waiting-page' }, message), 'ready-to-collect', 1800);
+}
+
 async function prepareSellerEnrichment(job, item, pendingCount) {
   if (job.collectSellerInfo === false) return { kind: 'disabled', job };
   if (!(await canContinueJob(job))) return { kind: 'cancelled', job: await readJob() };
@@ -1576,7 +1697,10 @@ async function advanceLinkJob(job, failureMessage = '') {
     pendingItem: null,
     pendingSellerUrl: '',
     pendingSellerKey: '',
-    pendingCount: 0
+    pendingCount: 0,
+    detailSession: nextIndex < job.links.length
+      ? createDetailSession(jobLinkUrl(job.links[nextIndex]))
+      : null
   };
 
   if (nextIndex >= job.links.length) {
@@ -1603,13 +1727,23 @@ async function advanceLinkJob(job, failureMessage = '') {
 
 async function processLinkJob(job) {
   if (!(await canContinueJob(job))) return readJob();
+  const currentLink = job.links?.[job.index];
+  const expectedUrl = jobLinkUrl(currentLink);
+  if (!expectedUrl) return advanceLinkJob(job, '详情链接为空，无法建立详情页加载会话。');
+
+  // 每个商品都拥有独立的逻辑详情会话：记录自己的 URL、开始时间、等待次数
+  // 和重新导航次数。物理上仍复用任务专用标签页，避免为一批商品打开几十个标签。
+  const sessionJob = ensureDetailSession(job, expectedUrl);
+  if (sessionJob !== job) {
+    await writeJob(jobMessage(sessionJob, `正在建立第 ${Number(job.index || 0) + 1} 个商品的详情页加载会话…`));
+    job = sessionJob;
+  }
+
   try {
     const pageInfo = await ensureContentReceiver(job.tabId);
     if (pageInfo?.pageType !== 'detail') {
       throw new Error('自动打开后当前标签页不是商品详情页，未写入非详情页面数据。');
     }
-    const currentLink = job.links?.[job.index];
-    const expectedUrl = jobLinkUrl(currentLink);
     if (expectedUrl && !itemUrlsMatch(pageInfo.url, expectedUrl)) {
       throw new Error('当前详情页链接与待采集商品不一致，已等待页面重新导航。');
     }
@@ -1631,11 +1765,7 @@ async function processLinkJob(job) {
     });
   } catch (error) {
     if (isJobCancelled(job)) return readJob();
-    const retries = Number(job.retries || 0) + 1;
-    if (retries <= 2) {
-      return scheduleJob({ ...job, retries }, 'ready-to-collect', 1500);
-    }
-    return advanceLinkJob({ ...job, retries: 0 }, error.message || String(error));
+    return retryDetailSession(job, expectedUrl, error);
   }
 }
 
@@ -1644,8 +1774,33 @@ async function processStoreProductsPage(job) {
   try {
     const pageInfo = await ensureContentReceiver(job.tabId);
     if (pageInfo?.pageType !== 'account') throw new Error('当前页面不是店铺账号页，无法发现店铺商品。');
-    const result = await sendTabMessage(job.tabId, { type: 'GET_STORE_PRODUCT_LINKS' }, 75_000);
+    const result = await sendTabMessage(job.tabId, { type: 'GET_STORE_PRODUCT_LINKS' }, STORE_DISCOVERY_MESSAGE_TIMEOUT_MS);
     if (!result?.ok) throw new Error(result?.error || '没有收到店铺商品链接');
+    const summary = storeDiscoverySummary(result);
+
+    // 只有“达到公开总数”或“页面明确没有更多商品”才允许进入详情阶段。
+    // 底部稳定但数量不足时继续让店铺页自己重扫；超过重试上限则失败，
+    // 不能把已发现的少量链接当成店铺全部商品而显示完成。
+    if (!summary.discoveryComplete) {
+      const retries = Number(job.storePageRetries || 0) + 1;
+      const waiting = {
+        ...job,
+        storePageRetries: retries,
+        targetCount: summary.publicProductCount ?? job.targetCount,
+        publicProductCount: summary.publicProductCount,
+        discoveredProductCount: summary.discoveredProductCount,
+        discoveryComplete: false,
+        discoveryReason: summary.discoveryReason,
+        message: result.error || '店铺商品链接尚未全部加载，正在继续等待店铺页完成渲染…'
+      };
+      if (retries <= 2) return scheduleJob(jobMessage(waiting, waiting.message), 'ready-to-collect', 2800);
+      return finishJob(
+        waiting,
+        'failed',
+        result.error || `店铺商品链接发现未完成：公开商品 ${summary.publicProductCount ?? '未知'}，已发现 ${summary.discoveredProductCount} 条。`
+      );
+    }
+
     const byKey = new Map();
     for (const raw of Array.isArray(result.items) ? result.items : []) {
       const item = compactSearchLink(raw);
@@ -1654,21 +1809,33 @@ async function processStoreProductsPage(job) {
     }
     const links = [...byKey.values()];
     if (!links.length) {
+      if (summary.publicProductCount === 0) {
+        return finishJob(job, 'completed', '店铺页面明确没有公开商品详情链接。');
+      }
       const retries = Number(job.storePageRetries || 0) + 1;
       if (retries <= 3) return scheduleJob({ ...job, storePageRetries: retries }, 'ready-to-collect', 2600);
       return finishJob(job, 'failed', '店铺页没有发现可进入的商品详情链接；请确认店铺商品列表已经加载完成。');
     }
-    const next = {
+
+    const nextBase = {
       ...job,
       stage: 'detail-page',
       links,
       index: 0,
-      targetCount: links.length,
+      targetCount: summary.publicProductCount ?? links.length,
+      publicProductCount: summary.publicProductCount,
+      discoveredProductCount: links.length,
+      discoveryComplete: true,
+      discoveryReason: summary.discoveryReason,
       storePageRetries: 0,
       pagesProcessed: 1,
       retries: 0,
-      message: `已从店铺页发现 ${links.length} 个商品，正在打开第 1 个详情页…`
+      detailSession: createDetailSession(jobLinkUrl(links[0])),
+      message: summary.mismatch
+        ? `店铺公开商品 ${summary.publicProductCount} 个，当前只发现 ${links.length} 个；正在逐个采集已发现详情页…`
+        : `已从店铺页确认 ${links.length} 个商品详情链接，正在打开第 1 个详情页…`
     };
+    const next = storeDiscoveryWarning(nextBase, summary);
     const waiting = jobMessage({ ...next, status: 'waiting-page' }, next.message);
     await writeJob(waiting);
     const firstLinkUrl = jobLinkUrl(links[0]);
@@ -2138,6 +2305,7 @@ async function startLinksJob(links, delayMs = 1500, mode = 'rpa') {
     retries: 0,
     delayMs: Math.max(1000, Number(delayMs) || 1500),
     tabId: tab.id,
+    detailSession: createDetailSession(links[0]),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     message: `已打开采集标签页，共 ${links.length} 个链接。`
@@ -2170,6 +2338,10 @@ async function startStoreProductsJob(storeUrl, delayMs = 1800, mode = 'rpa', sto
     links: [],
     index: 0,
     targetCount: 0,
+    publicProductCount: null,
+    discoveredProductCount: 0,
+    discoveryComplete: false,
+    discoveryReason: '',
     pagesProcessed: 0,
     collected: 0,
     visited: 0,

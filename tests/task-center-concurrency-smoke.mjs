@@ -146,7 +146,7 @@ const context = vm.createContext({
 
 const source = fs.readFileSync(new URL('../background.js', import.meta.url), 'utf8');
 vm.runInContext(
-  `${source}\n;globalThis.__taskCenterTestApi = { writeJob, readJobs, readJob, jobLinkUrl, jobLinkItemId, collectedItemForLink, advanceLinkJob, downloadFileName, exportTimestamp, rememberDownloadName, clearAllJobs };`,
+  `${source}\n;globalThis.__taskCenterTestApi = { writeJob, readJobs, readJob, jobLinkUrl, jobLinkItemId, collectedItemForLink, advanceLinkJob, downloadFileName, exportTimestamp, rememberDownloadName, clearAllJobs, storeDiscoverySummary, storeDiscoveryWarning, createDetailSession, ensureDetailSession };`,
   context
 );
 
@@ -199,6 +199,39 @@ assert.equal(
   'object-link-1',
   'store-products link objects must keep their item id'
 );
+const incompleteDiscovery = context.__taskCenterTestApi.storeDiscoverySummary({
+  publicProductCount: 12,
+  discoveredProductCount: 4,
+  discoveryComplete: false,
+  discoveryReason: 'discovery-timeout-before-public-total',
+  items: []
+});
+assert.equal(incompleteDiscovery.publicProductCount, 12);
+assert.equal(incompleteDiscovery.discoveredProductCount, 4);
+assert.equal(incompleteDiscovery.discoveryComplete, false);
+assert.equal(incompleteDiscovery.discoveryReason, 'discovery-timeout-before-public-total');
+assert.equal(incompleteDiscovery.mismatch, true, 'store discovery must not treat four links as complete when the public store count is twelve');
+assert.equal(
+  context.__taskCenterTestApi.storeDiscoverySummary({
+    publicProductCount: 12,
+    discoveredProductCount: 12,
+    discoveryComplete: true,
+    discoveryReason: 'public-total-reached',
+    items: []
+  }).mismatch,
+  false,
+  'store discovery must close the discovery phase after reaching the public total'
+);
+const sessionJob = context.__taskCenterTestApi.ensureDetailSession({
+  id: 'session-test',
+  detailSession: null
+}, 'https://www.goofish.com/item?id=session-1');
+assert.equal(sessionJob.detailSession.url, 'https://www.goofish.com/item?id=session-1');
+assert.equal(sessionJob.detailSession.attempts, 0);
+assert.notEqual(sessionJob.detailSession.id, context.__taskCenterTestApi.ensureDetailSession({
+  id: 'session-test',
+  detailSession: null
+}, 'https://www.goofish.com/item?id=session-2').detailSession.id);
 const matched = context.__taskCenterTestApi.collectedItemForLink({ items: [{
   itemId: 'object-link-1',
   itemUrl: 'https://www.goofish.com/item?id=object-link-1',

@@ -11,6 +11,9 @@
   const MAX_PAGE_ITEMS = 300;
   const MAX_NETWORK_BUFFER = 120;
   const RUNTIME_MESSAGE_TIMEOUT_MS = 12000;
+  const STORE_PRODUCT_DISCOVERY_MAX_ROUNDS = 90;
+  const STORE_PRODUCT_DISCOVERY_TIMEOUT_MS = 65000;
+  const STORE_PRODUCT_DISCOVERY_STABLE_ROUNDS = 4;
   const pageItems = new Map();
   const networkBuffer = [];
   let captureEnabled = false;
@@ -1752,7 +1755,21 @@
 
   function publicLoginDialog() {
     const bodyText = oneLine(document.body?.innerText || '', 20000);
-    if (!bodyText.includes('短信登录') || !bodyText.includes('手机扫码安全登录')) return null;
+    const hasLoginText = bodyText.includes('短信登录') && bodyText.includes('手机扫码安全登录');
+    const loginIframe = [...document.querySelectorAll('iframe')]
+      .filter(visibleElement)
+      .find(node => /(?:alibaba|login|signin|passport)/i.test([
+        node.id,
+        node.getAttribute?.('name'),
+        node.getAttribute?.('title'),
+        node.getAttribute?.('src'),
+        node.className
+      ].filter(Boolean).join(' ')));
+
+    // 闲鱼的公开登录提示有时把“短信登录/手机扫码安全登录”放在跨域 iframe
+    // 内，主页面 innerText 看不到这两句话。只要能确认可见登录 iframe，就把
+    // 它的外层弹窗作为遮罩处理对象，仍然只点击关闭/遮罩，不填写登录信息。
+    if (!hasLoginText && !loginIframe) return null;
 
     const selectors = [
       '[role="dialog"]',
@@ -1786,7 +1803,13 @@
         .sort((first, second) => first.area - second.area);
     }
 
-    return candidates[0]?.node || null;
+    if (candidates[0]?.node) return candidates[0].node;
+    if (loginIframe) {
+      return loginIframe.closest?.('[role="dialog"], [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"]')
+        || loginIframe.parentElement
+        || loginIframe;
+    }
+    return null;
   }
 
   async function dismissPublicLoginOverlay() {
@@ -2080,6 +2103,28 @@
     return items;
   }
 
+  function publicCountNumber(value) {
+    const text = oneLine(value, 100).replace(/,/g, '');
+    if (!text) return null;
+
+    const compact = text.match(/([\d]+(?:\.\d+)?)\s*(万|w)/i);
+    if (compact) {
+      const number = Number(compact[1]);
+      if (Number.isFinite(number) && number >= 0) return Math.round(number * 10000);
+    }
+
+    const integer = text.match(/\d{1,9}/);
+    if (!integer) return null;
+    const number = Number(integer[0]);
+    return Number.isFinite(number) && number >= 0 ? number : null;
+  }
+
+  function storePageHasExplicitNoMoreProducts(root = document) {
+    const text = oneLine(root?.body?.innerText || root?.body?.textContent || '', 30000);
+    if (!text) return false;
+    return /(?:没有更多(?:商品|宝贝)(?:了)?|(?:全部|所有)(?:商品|宝贝)(?:已|均已)加载|(?:商品|宝贝)列表(?:已|均已)加载完|商品(?:已|均已)到底|宝贝(?:已|均已)到底)/i.test(text);
+  }
+
   async function collectStoreProductLinks() {
     const prepared = await preparePublicPage('account', 14);
     if (!prepared.ready) return { ...prepared, items: [] };
@@ -2088,40 +2133,97 @@
     const ordered = new Map();
     let stableRounds = 0;
     let previousCount = 0;
+    let previousHeight = 0;
+    let publicProductCount = publicCountNumber(accountProfileFromPage()?.sellerProductCount);
+    let discoveryComplete = false;
+    let discoveryReason = '';
+    const startedAt = Date.now();
     try {
       window.scrollTo({ top: 0, left: originalX, behavior: 'auto' });
       await delay(320);
-      for (let round = 0; round < 60; round++) {
+      for (let round = 0; round < STORE_PRODUCT_DISCOVERY_MAX_ROUNDS; round++) {
         await dismissPublicLoginOverlay();
         for (const item of storeProductLinkItems(document)) {
           const key = item.itemId ? `id:${item.itemId}` : `url:${item.itemUrl}`;
           if (!ordered.has(key)) ordered.set(key, item);
         }
+
+        // 商品 Tab 计数通常比商品卡片晚渲染。每一轮都重新读取，避免首屏资料
+        // 刚出现时把“未知总数”错误地当成“已经读完”。
+        const profile = accountProfileFromPage();
+        const currentPublicCount = publicCountNumber(profile?.sellerProductCount);
+        if (currentPublicCount !== null) publicProductCount = currentPublicCount;
+
+        if (publicProductCount !== null && ordered.size >= publicProductCount) {
+          discoveryComplete = true;
+          discoveryReason = 'public-total-reached';
+          break;
+        }
+
+        if (storePageHasExplicitNoMoreProducts(document)) {
+          discoveryComplete = true;
+          discoveryReason = 'explicit-no-more';
+          break;
+        }
+
         const scrollRoot = document.scrollingElement || document.documentElement;
         const currentTop = window.scrollY || scrollRoot.scrollTop || 0;
         const maxTop = Math.max(0, scrollRoot.scrollHeight - window.innerHeight);
         const atBottom = currentTop >= maxTop - 120;
-        if (atBottom && ordered.size === previousCount) stableRounds += 1;
+        const heightUnchanged = scrollRoot.scrollHeight === previousHeight;
+        if (atBottom && ordered.size === previousCount && heightUnchanged) stableRounds += 1;
         else stableRounds = 0;
         previousCount = ordered.size;
-        if (atBottom && stableRounds >= 3) break;
-        window.scrollTo({
-          top: Math.min(maxTop, currentTop + Math.max(680, window.innerHeight * 0.84)),
-          left: originalX,
-          behavior: 'auto'
-        });
+        previousHeight = scrollRoot.scrollHeight;
+
+        // 已知公开总数但尚未达到时，底部稳定不能直接视为完成。闲鱼常在
+        // 底部停留后才挂载下一批卡片，所以继续给懒加载一次触发机会。
+        if (atBottom && stableRounds >= STORE_PRODUCT_DISCOVERY_STABLE_ROUNDS) {
+          window.scrollTo({
+            top: Math.max(0, maxTop - Math.max(280, window.innerHeight * 0.35)),
+            left: originalX,
+            behavior: 'auto'
+          });
+          await delay(650);
+          window.scrollTo({ top: maxTop, left: originalX, behavior: 'auto' });
+        } else {
+          window.scrollTo({
+            top: Math.min(maxTop, currentTop + Math.max(680, window.innerHeight * 0.84)),
+            left: originalX,
+            behavior: 'auto'
+          });
+        }
+
         await delay(round < 4 ? 520 : 700);
+        if (Date.now() - startedAt >= STORE_PRODUCT_DISCOVERY_TIMEOUT_MS) break;
       }
     } finally {
       window.scrollTo({ top: originalY, left: originalX, behavior: 'auto' });
     }
+
+    if (!discoveryComplete) {
+      discoveryReason = publicProductCount !== null
+        ? 'discovery-timeout-before-public-total'
+        : 'discovery-timeout-without-public-total';
+    }
+
+    const discoveredProductCount = ordered.size;
     return {
       ok: true,
-      ready: ordered.size > 0,
+      ready: discoveryComplete && (discoveredProductCount > 0 || publicProductCount === 0),
       pageType: 'account',
       items: [...ordered.values()].slice(0, 2000),
-      productCount: ordered.size,
-      overlayDismissed: prepared.overlayDismissed
+      productCount: discoveredProductCount,
+      publicProductCount,
+      discoveredProductCount,
+      discoveryComplete,
+      discoveryReason,
+      overlayDismissed: prepared.overlayDismissed,
+      ...(discoveryComplete ? {} : {
+        error: publicProductCount !== null
+          ? `店铺公开商品数为 ${publicProductCount}，目前只发现 ${discoveredProductCount} 条；页面仍未确认全部商品已加载。`
+          : `目前只发现 ${discoveredProductCount} 条商品，页面未提供可核对的公开商品总数，也未确认没有更多商品。`
+      })
     };
   }
 
