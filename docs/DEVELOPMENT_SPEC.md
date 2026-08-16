@@ -1,7 +1,8 @@
 # 闲鱼公开商品研究采集器｜开发文档
 
-版本：0.6.0（监控开发分支，已同步稳定版 0.5.14 修复）
-日期：2026-08-09
+版本：0.6.5
+日期：2026-08-16
+分支：`codex/monitoring`（已同步 `main` 最新采集修复）
 实现基线：Chrome Manifest V3
 
 ## 1. 技术目标
@@ -18,6 +19,7 @@ Service Worker（任务编排、存储、通知、下载调度）
    │ tabs.update / tabs.sendMessage / alarms
    ▼
 采集专用标签页
+   ├─ image-utils.js（隔离世界共享：轮播图识别、CDN 尺寸归一化、图片候选去重）
    ├─ content.js（隔离世界：DOM 解析、消息接收、结果上报）
    └─ main-world.js（页面上下文：被动观察 fetch/XHR 的公开响应）
    │
@@ -37,7 +39,7 @@ Service Worker（任务编排、存储、通知、下载调度）
 
 ### 3.1 Service Worker：`background.js`
 
-- 维护唯一活动任务 `xianyu_collect_job_v1`。
+- 维护任务集合 `xianyu_collect_jobs_v2`，兼容旧的 `xianyu_collect_job_v1`；每个任务拥有独立 ID、采集专用标签页和闹钟，侧边栏关闭或返回首页不会丢失任务。
 - 创建并复用采集标签页，处理详情链接顺序和搜索页分页；商品任务每条详情成功后在同一个任务标签页进入卖家账号页，读完基础资料再推进下一条，最后一条不跳过店铺阶段。
 - 通过 `chrome.alarms` 驱动任务阶段，避免依赖某个页面脚本的长时间 Promise。
 - 合并、清洗、去重商品记录，写入 `xianyu_public_items_v1`。
@@ -48,13 +50,15 @@ Service Worker（任务编排、存储、通知、下载调度）
 - `STOP_JOB` 先登记内存取消令牌，再写入 `stopped` 终态、清除任务闹钟并关闭采集专用标签页；所有异步阶段在写状态、导航和重新排闹钟前都必须确认任务 ID 仍是当前活动任务。
 - 所有 `tabs.sendMessage` 都有有限超时；页面没有响应时由阶段重试/失败逻辑接管，不能让 Service Worker 的任务 Promise 无限等待。
 - 详情页和账号页导航完成后统一调用 `PREPARE_PUBLIC_PAGE`：先处理公开登录遮罩，再等待页面类型和关键语义字段稳定。`tabs.status=complete` 只表示文档加载完成，不能作为详情字段已经可读的唯一依据。
-- 读取活动任务状态时检查更新时间；`collecting`/`waiting-page` 超过 90 秒没有进展时写入失败结论并释放唯一活动任务锁，`ready-to-collect` 则重新安排一次闹钟，兼容扩展重载或 Service Worker 睡眠丢失 alarm 的情况。
+- 读取每个任务状态时检查更新时间；`collecting`/`waiting-page` 超过 90 秒没有进展时只写入该任务的失败结论并释放该任务自己的闹钟/采集标签页，`ready-to-collect` 则重新安排一次闹钟，兼容扩展重载或 Service Worker 睡眠丢失 alarm 的情况。任务之间不共享全局锁。
 - 通过 `chrome.downloads` 发起最终文件下载；下载根目录由浏览器设置决定。
+- 通过 `downloads.onDeterminingFilename` 对本次生成的 Blob URL 绑定期望文件名；即使用户开启“另存为”，系统保存对话框也会收到同一业务文件名，而不是随机 UUID。
 - 商品导出只接收商品结果和空的店铺资料集合；店铺导出只接收店铺资料/评价，生成独立的店铺工作簿，禁止通过 `readItems()` 把历史商品链接带入店铺文件。当前详情页的基础店铺补采集使用当前标签页往返，不创建临时卖家标签页。
 - 维护 `xianyu_monitor_configs_v1` 和 `xianyu_monitor_runs_v1` 两组独立状态：前者保存商品/店铺监控配置，后者保存当前逐条执行进度，不写入普通 `xianyu_collect_job_v1`。
 - 以 `xianyu_monitor_alarm_v1:<monitorId>` 建立每日闹钟；触发后每个链接单独处理并在链接之间重新安排短闹钟，使 Service Worker 休眠或重载后仍可从 `index` 继续，而不是依赖一个超长 Promise。
 - 商品监控复用详情页校验、API/DOM 采集、卖家入口发现和账号页补采逻辑；店铺监控复用店铺资料与评价图片采集逻辑。两类监控分别调用 `runExport` 的商品/店铺导出分支，自动下载但不自动合并数据中心。
 - 监控专用标签页以 `active:false` 创建，完成、暂停、删除或异常终止时关闭；如果标签页中途被关闭，下一步会重新创建，不影响用户原本正在看的标签页。
+- 支持 `store-products` 任务，严格分四阶段执行：①先读取店铺页公开显示的商品总数；②滚动发现商品详情链接，直到发现数达到公开总数，或页面明确显示没有更多商品；③每个链接建立独立的逻辑详情加载会话（记录 URL、开始时间、尝试次数和重新导航次数），物理上复用该任务专用标签页；④当前详情页未达到稳定条件时，在该链接的 45 秒截止时间内继续等待、关闭公开登录遮罩、重新扫描，必要时重新导航当前链接，不能提前进入下一个商品。店铺全部商品任务与“当前店铺资料/评价”任务分开保存。
 
 ### 3.2 侧边栏：`sidepanel.html/js/css`
 
@@ -67,6 +71,10 @@ Service Worker（任务编排、存储、通知、下载调度）
 - 展示页面详情模式与接口观察模式的差异提示，保存模式选择、下载方式和导出设置。
 - 监控页维护商品/店铺两个入口，表单保存名称、链接、每日时间和相对下载文件夹；已保存列表显示运行状态、下次运行时间、上次结论和立即运行/编辑/暂停/删除操作。
 - 监控面板每 5 秒读取一次 `GET_MONITORS`，不会把监控进度渲染到普通任务进度环，也不会因为监控运行而禁用当前详情、店铺、批量或搜索入口。
+- 设置页提供字段配置工作台；商品表、店铺资料表和店铺评价表分别维护字段 ID 列表，字段选择、移除和顺序调整保存到设置中，导出器只按对应列表生成列。
+- 任务中心显示所有任务，而不是只显示主任务；可查看指定任务、暂停/继续、停止、提交数据中心或导出。页面按钮只有在任务属于当前用户标签页时才锁定，因此后台任务运行期间仍可启动其它任务。
+- 任务中心提供“清空全部任务”：先登记所有任务取消令牌，清除每个任务闹钟并关闭其采集专用标签页，再以空任务集合持久化；不触碰历史快照和数据中心。
+- 历史页不截断前 8 条，提供“清空全部历史”；当前详情/店铺状态查询同时检查数据中心与历史快照，发现同一对象时只改变按钮为“重新采集”，实际采集仍重新读取当前页面。
 
 ### 3.3 隔离世界：`content.js`
 
@@ -76,7 +84,8 @@ Service Worker（任务编排、存储、通知、下载调度）
 - 维护当前页面的短期网络响应缓冲，使“开始接口观察”晚于页面请求时仍能读取最近响应。
 - 接收 `COLLECT_CURRENT_PAGE`、`START_API_CAPTURE`、`GET_SEARCH_LINKS`、`GO_NEXT_PAGE` 等消息。
 - 接收 `COLLECT_CURRENT_STORE_PAGE`，自动激活评价区域、滚动懒加载评价，并返回店铺资料与逐条评价图片。
-- `PREPARE_PUBLIC_PAGE` 只在同时检测到“短信登录”和“手机扫码安全登录”时识别公开登录对话框；优先点击对话框关闭按钮，兜底点击遮罩安全空白处，不填写凭据、不绕过登录限制。处理后按 `detail/account/search` 的页面关键内容轮询稳定状态。
+- 接收 `GET_STORE_PRODUCT_LINKS`，在账号页按视觉坐标顺序滚动发现店铺下的商品详情链接，并返回 `publicProductCount`、`discoveredProductCount`、`discoveryComplete` 和 `discoveryReason`；该阶段只发现链接，不把店铺卡片字段冒充商品详情字段。已知公开总数但发现数不足时，底部稳定不等于完成；只有达到公开总数或看到明确的“没有更多商品/宝贝”提示才结束发现阶段。
+- `PREPARE_PUBLIC_PAGE` 只在同时检测到“短信登录”和“手机扫码安全登录”时识别公开登录对话框；对于登录内容位于跨域 iframe 的版本，还识别可见的 `alibaba-login-box`/登录 iframe 外层。优先点击对话框关闭按钮，兜底点击遮罩安全空白处，不填写凭据、不绕过登录限制。处理后按 `detail/account/search` 的页面关键内容轮询稳定状态。详情页准备阶段会在文案语义区域点击“展开/展开全文/查看更多/更多文案”等折叠控件，再读取完整文案。
 - 账号页解析先从 `infoTop--*` 向上定位同时包含账号统计和简介兄弟节点的最小资料作用域；不能把只含昵称的 `infoTop` 当成完整资料区。兼容 `bottom--*`、`intro--*`、`description--*` 和 `data-testid` 简介容器；不再在整个 `body` 中用通用 `description` 或第一个 `.num--*` 猜字段。
 - 店铺页采集会轮询/读取稳定的账号资料；商品任务会在 `account-page` 阶段自动进入卖家账号页，读取稳定的基础资料后合并回 `stagedItems`；该阶段不写入全局店铺表，也不把未完整加载的评价冒充店铺任务结果。只有 `COLLECT_CURRENT_STORE_PAGE` 的明确提交才写入店铺资料/评价存储。
 - 店铺简介按语义节点保留原文，纯数字是允许的用户自定义简介；数字格式只用于明确的数量、百分比和时长字段，不作为简介过滤条件。
@@ -90,6 +99,7 @@ Service Worker（任务编排、存储、通知、下载调度）
 - DOM/API/二次扫描合并使用非空字段优先策略；类目使用语义值优先策略，内部 `类目ID` 不能覆盖可见服务类型，也不会在 DOM 明确没有名称时继续冒充类目。
 - `COLLECT_CURRENT_PAGE`、`START_API_CAPTURE`、店铺资料保存和商品数据保存都必须有异常回调；任何解析或运行时消息异常都要调用 `sendResponse`，避免后台误判为仍在处理中。
 - 当前详情和接口观察回传侧边栏时，优先使用 `COLLECT_ITEMS` 后台返回的详情身份过滤结果，不直接使用原始扫描数组；这样单独导出只包含当前商品。
+- 详情图片只从 `item-main-window-carousel` 的真实 `carouselItem` 读取；带 `only` 的单图轮播只保留一张，缩略图、隐藏预览图和已售出遮罩会在页面采集层排除，同图的 `220x`、`790x`、原图 CDN 变体在进入导出前归一为一个图片候选。
 
 ### 3.4 页面上下文：`main-world.js`
 
@@ -100,11 +110,11 @@ Service Worker（任务编排、存储、通知、下载调度）
 
 ### 3.5 导出器：`xlsx.js` 与 offscreen 文档
 
-- `xlsx.js` 负责生成工作簿、主表、图片索引表、错误表和图片 drawing/media。
+- `xlsx.js` 负责生成工作簿、可配置字段列、图片 drawing/media 和说明表；商品图片与商品字段在同一张“商品数据”表，主图保留在配置位置，额外图片列追加到表格末尾；店铺工作簿仍为“店铺资料”和“店铺评价综合”两张表。offscreen 图片准备阶段按商品/评价作用域使用规范化 URL、图片二进制和 32×32 视觉指纹去重，并重新编号；`xlsx.js` 只做同样规则的安全兜底，不把重复图片带进工作簿字段和 drawing。
 - 店铺工作簿固定只有两张数据表：“店铺资料”和“店铺评价综合”；导出时 workbook `activeTab=0` 打开“店铺资料”，店铺资料一店一行，评价和评价图片在第二张表按评价行合并。
 - 图片下载使用扩展已声明的 CDN host 权限，并优先 `credentials: omit`。
-- 可识别 JPEG/PNG/GIF/WEBP；对 Excel 不适合的图片格式先在 offscreen canvas 中转为 JPEG/PNG。
-- 生成文件名时清洗 Windows 非法字符，按设置拼接相对目录。
+- 可识别 JPEG/PNG/GIF/WEBP；优先保留原始 JPEG/PNG/GIF 二进制并尝试清除缩略图参数获取原图，对不兼容或超过 8192px/24MB 的图片才在 offscreen canvas 中转换，转换质量为 0.96。
+- 生成文件名时清洗 Windows 非法字符，按设置拼接相对目录；文件名固定为商品 `商品YYYYMMDD-HHmm.xlsx`、店铺评价 `店铺评价-店铺名-YYYYMMDD-HHmm.xlsx`、店铺全部商品 `商品表-店铺名-YYYYMMDD-HHmm.xlsx`。
 
 ## 4. 任务状态机
 
@@ -127,7 +137,7 @@ idle
 
  任意活动状态 ──停止/标签页关闭──► stopped
  任意活动状态 ──不可恢复错误────► failed
- 任意活动状态 ──90 秒无更新时间──► failed（自动释放任务锁）
+ 任意活动状态 ──90 秒无更新时间──► failed（只释放该任务资源）
 正常达到目标或边界────────────► completed
 ```
 
@@ -165,13 +175,15 @@ pause/delete ─► clear alarm + close monitor tab
 
 ```js
 {
-  id, type: 'links' | 'search', mode: 'rpa' | 'api', status,
+  id, type: 'links' | 'search' | 'store-products', mode: 'rpa' | 'api', status,
   tabId, startUrl, pageUrl, stage,
   links, index, pageLinks, detailIndex, seenLinks,
   expectedDetailUrl, expectedSearchPage, searchPageRetries,
   sellerProfiles, sellerFailures, collectSellerInfo,
   pendingItem, pendingSellerUrl, pendingSellerKey, pendingCount,
-  targetCount, maxPages, visited, pagesProcessed, collected,
+  targetCount, publicProductCount, discoveredProductCount, discoveryComplete, discoveryReason,
+  maxPages, visited, pagesProcessed, collected,
+  detailSession: { id, url, startedAt, attempts, reloads, lastError },
   stagedItems, committedToDataCenter,
   failures, retries, delayMs, createdAt, updatedAt, message
 }
@@ -181,6 +193,8 @@ pause/delete ─► clear alarm + close monitor tab
 
 - `content.js` 的 `detailPageLooksReady()` 只在详情页文案/标题、价格或图片，以及图片或完整卖家入口已经出现时返回 ready；骨架屏、协议页和推荐卡片不能进入最终商品暂存区。
 - 商品任务拿到详情结果后，如果详情页没有卖家 URL，会重复请求真实卖家入口；入口来自页面可见 `/personal?userId=...` 链接、页面公开的 user/seller/shop ID 属性或语义属性，不根据昵称猜账号 URL。
+- `links` 任务的 `links[]` 是字符串，而 `store-products` 任务的 `links[]` 是包含 `itemUrl/itemId/title` 的对象；所有导航、详情 URL 校验、商品匹配和失败记录都必须经过 `jobLinkUrl()`/`jobLinkItemId()` 归一化，禁止把对象直接传给 `tabs.update`。
+- `store-products` 的店铺发现结果必须先通过公开总数/明确无更多条件，再建立第一个 `detailSession`；每次 `advanceLinkJob()` 都创建下一条链接的新会话。详情采集失败时只更新当前会话的 `attempts/lastError`，在 45 秒截止时间内最多按间隔重新导航当前 URL，截止后才把该 URL 记录为失败并推进任务。
 - 账号页补采使用同一任务标签页，先处理公开登录遮罩，再等待账号资料语义区域稳定，连续两次读取签名一致后才合并。商品任务使用 `sanitizeStoreProfile(..., { forProduct: true })`，保留商品行需要的“开店时长”和“商品好评率”；店铺总表仍使用默认裁剪，不写入这两个不可由店铺页可靠提供的字段。
 - 同一批任务内的账号页缓存标记为 `productFieldsLoaded`；持久化店铺资料只能补通用店铺字段，不能跳过商品任务所需的账号页补采。
 
@@ -203,19 +217,23 @@ pause/delete ─► clear alarm + close monitor tab
 | --- | --- |
 | `GET_STATUS` | 读取当前数据数 |
 | `GET_ITEMS` | 读取当前数据 |
+| `GET_ITEM_STATUS` | 检查当前商品是否已存在于数据中心、任务快照或采集历史 |
 | `GET_JOB_STATUS` | 读取活动任务 |
 | `START_BATCH_LINKS` | 启动链接批量任务，携带 `links/mode` |
 | `START_SEARCH_CRAWL` | 启动搜索跨页任务，携带 `startUrl/targetCount/maxPages/mode` |
+| `START_STORE_PRODUCTS` | 启动店铺全部商品详情任务，携带 `storeUrl/storeName/mode`；先扫描店铺商品链接，再逐个访问详情页 |
 | `STOP_JOB` | 停止活动任务 |
+| `CLEAR_JOBS` | 停止并清理全部任务、闹钟和采集专用标签页，不删除历史和数据中心 |
+| `PAUSE_JOB` / `RESUME_JOB` | 暂停或继续指定任务，不影响其它任务 |
 | `COMMIT_ITEMS` | 把当前详情页临时结果合并到数据中心商品表 |
 | `COMMIT_JOB_RESULT` | 把已完成批量/搜索任务的 `stagedItems` 合并到数据中心商品表 |
 | `EXPORT_ITEMS` | 按 `taskType` 导出商品、当前详情或当前店铺；商品与店铺数据不混用 |
 | `EXPORT_JOB_RESULT` | 导出当前任务暂存的商品结果，不读取历史商品集合 |
 | `GET_SETTINGS` / `SAVE_SETTINGS` | 读写下载和导出设置 |
 | `GET_HISTORY` / `DELETE_HISTORY` | 读写历史任务 |
-| `GET_PAGE_SNAPSHOT` | 导出当前实时 DOM、公开响应、页面资源索引和账号页字段解析快照 |
-| `GET_STORE_STATUS` | 按当前 `/personal?userId=...` 查询本地历史店铺资料、评价数量和最近采集时间 |
-| `COLLECT_STORE_PROFILE` | 保存店铺公开资料、评价和评价图片索引 |
+| `CLEAR_HISTORY` | 清空历史快照，不影响任务和数据中心 |
+| `GET_STORE_STATUS` | 按当前 `/personal?userId=...` 查询数据中心与历史快照中的店铺资料、评价数量和最近采集时间 |
+| `COLLECT_STORE_PROFILE` | 保存店铺公开资料、逐条评价和评价图片对象 |
 | `COMMIT_STORE_PROFILE` | 把当前店铺页暂存结果加入数据中心店铺表 |
 | `ENRICH_SINGLE_ITEM` | 当前详情页复用原标签页访问卖家账号页，返回补齐后的商品结果 |
 | `GET_SELLER_ENTRY` | 从当前商品详情页卖家昵称及其父级个人页链接发现卖家账号页 |
@@ -233,6 +251,7 @@ pause/delete ─► clear alarm + close monitor tab
 | `COLLECT_CURRENT_PAGE` | RPA/DOM 详情采集 |
 | `START_API_CAPTURE` | 开启接口观察并发送当前页网络缓冲 |
 | `GET_SEARCH_LINKS` | 读取搜索页商品详情链接 |
+| `GET_STORE_PRODUCT_LINKS` | 滚动当前账号/店铺页，按视觉顺序读取公开商品详情链接 |
 | `PREPARE_PUBLIC_PAGE` | 关闭公开登录提示并等待指定页面类型的关键内容稳定 |
 | `GET_ACCOUNT_PROFILE` | 读取卖家账号页简介、统计和公开评价 |
 | `COLLECT_CURRENT_STORE_PAGE` | 进入评价区域、滚动加载并返回当前店铺页完整公开资料与评价 |
@@ -250,7 +269,7 @@ pause/delete ─► clear alarm + close monitor tab
     sellerName, sellerUrl, sellerLocation, sellerFollowers, sellerFollowing,
     viewCount, wantCount, sellerProductCount, sellerIntro, storeDuration,
     reviewSummary, itemGoodRate, sellerReviewSummary, sellerReviewCount, reviewSamples,
-    publishedAt, sourcePage, dataSource, collectedAt
+    sourcePage, dataSource, collectedAt
   }],
   pageType: 'detail', sourcePage, reason
   persistToDataCenter: false
@@ -273,13 +292,9 @@ pause/delete ─► clear alarm + close monitor tab
 
 ### 商品主表
 
-固定 20 列，顺序为：`商品ID、商品链接、主图文件名、商品图片、商品文案、浏览数、想要数、价格、类目、店铺名称、卖家账号页、卖家地区、粉丝数、关注数、卖家商品数、店铺简介、开店时长、商品好评率、店铺评价数、采集时间`。标题、来源页面、数据来源、图片状态等作为内部字段保留，不再进入主表。浏览数和想要数来自当前详情页可见的对应标签或当前详情已收到的明确接口字段，无法对应时留空。每个商品的全部图片逐张进入“图片索引”并嵌入，主表展示第一张成功主图。
+默认 20 列，顺序为：`商品ID、商品链接、主图文件名、商品图片、商品文案、浏览数、想要数、价格、类目、店铺名称、卖家账号页、卖家地区、粉丝数、关注数、卖家商品数、店铺简介、开店时长、商品好评率、店铺评价数、采集时间`。设置中的字段配置可以选择其它可用字段并调整顺序；导出器只输出当前表对应的已选字段。商品字段目录不再提供发布时间、商品评价摘要、店铺评价摘要、评价示例等不稳定辅助字段。浏览数和想要数来自当前详情页可见的对应标签或当前详情已收到的明确接口字段，无法对应时留空。商品图片字段只在配置位置生成主图列，额外的去重图片列统一追加到表格最后；同一逻辑图片不能因为 CDN 缩略图参数或重复二进制而重复嵌入。
 
 商品任务导出使用 `stagedItems` 或显式传入的临时商品集合；数据中心导出使用 `xianyu_public_items_v1`。两者只有在用户点击加入按钮后才合并。
-
-### 图片索引表
-
-商品图片一张一行，字段包括：商品 ID、内部标题、图片序号、图片名称、嵌入状态、失败原因、原始图片 URL。店铺评价图片在“店铺评价综合”表的评价对应行显示文件名、状态和失败原因，并由该表的 drawing 真实嵌入；图片对象由商品主表、图片索引和店铺评价综合表分别承载。
 
 ### 店铺资料表与店铺评价综合表
 
@@ -292,7 +307,7 @@ pause/delete ─► clear alarm + close monitor tab
 
 ```text
 读取商品任务暂存结果或数据中心商品结果
-   → 商品导出读取商品图片索引；店铺导出读取当前店铺资料、评价对象和图片对象，分别写入店铺资料行与评价综合行
+   → 商品导出读取商品图片 URL 并直接生成同一商品行的图片列；店铺导出读取当前店铺资料、评价对象和图片对象，分别写入店铺资料行与评价综合行
    → 根据商品图片上限生成商品图片任务；评价图片单独按已加载评价全部生成任务
    → 并发下载并解码/转码
    → 生成 xlsx Blob
@@ -300,7 +315,7 @@ pause/delete ─► clear alarm + close monitor tab
    → 保存历史导出信息
 ```
 
-自动下载在商品任务终态为 `completed` 或 `partial` 且设置为 `auto` 时触发，使用该任务的 `stagedItems`；没有成功进入任何详情页的搜索任务会是 `failed`，不会自动下载一份“完成 0 条”的文件。手动模式只保存任务结果并显示“导出本次商品数据”按钮。当前详情页和当前店铺页采集完成后分别显示自己的导出按钮。下载错误不会丢失已采集数据。商品 ID、图片索引中的商品 ID 和店铺 ID 使用文本单元格样式，避免 Excel 将长 ID 显示成科学计数法或发生精度丢失。
+自动下载在商品任务终态为 `completed` 或 `partial` 且设置为 `auto` 时触发，使用该任务的 `stagedItems`；没有成功进入任何详情页的搜索任务会是 `failed`，不会自动下载一份“完成 0 条”的文件。手动模式只保存任务结果并显示“导出本次商品数据”按钮。当前详情页、当前店铺页和店铺全部商品任务完成后分别显示自己的导出入口。下载错误不会丢失已采集数据。商品 ID 和店铺 ID 使用文本单元格样式，避免 Excel 将长 ID 显示成科学计数法或发生精度丢失。
 
 ## 8. 设置模型
 
@@ -309,7 +324,6 @@ pause/delete ─► clear alarm + close monitor tab
   mode: 'rpa' | 'api',
   downloadMode: 'auto' | 'manual',
   downloadFolder: '闲鱼研究采集',
-  fileNameTemplate: '闲鱼商品研究-{date}-{count}',
   saveAs: false,
   imageLimit: 0,
   maxEmbedImages: 1000,
@@ -319,7 +333,7 @@ pause/delete ─► clear alarm + close monitor tab
 }
 ```
 
-`downloadFolder` 只能是浏览器下载根目录下的相对路径，禁止 `..` 和绝对路径。`fileNameTemplate` 最终扩展名由插件统一追加 `.xlsx`。
+`downloadFolder` 只能是浏览器下载根目录下的相对路径，禁止 `..` 和绝对路径。文件名不再由用户模板控制，而是按商品、店铺评价、店铺全部商品三类数据自动生成，时间精确到分钟。
 
 监控配置不复用 `downloadMode` 和 `saveAs`：监控必须自动下载，因此运行时强制 `downloadMode=auto`、`saveAs=false`，但继承图片上限、通知开关和保存时选定的 `mode`。监控下载文件名包含监控名称、监控类型、日期、时间和结果数量，避免同一天多个监控互相覆盖；Chrome 仍可能在同名文件后追加序号。
 
@@ -329,15 +343,16 @@ pause/delete ─► clear alarm + close monitor tab
 - 页面不是详情页：立即返回实际 `pageType=search/account` 和可操作提示；搜索页跨页入口必须在 `pageType=search` 时启用。
 - 搜索专用标签页不是搜索页、详情专用阶段不是详情页或当前 URL 与待采集商品 ID 不一致：不写入数据，按阶段重试；超过次数后记录失败。
 - 搜索页商品卡片暂未出现：最多等待多轮异步渲染；如果从未进入详情页，任务为失败而不是完成。
-- 公开登录提示遮挡详情/账号页：先关闭提示并等待关键字段；超时后记录“页面尚未稳定加载”，禁止采集骨架屏或返回空字段成功。
+- 公开登录提示遮挡详情/账号页：先关闭提示并等待关键字段；同时兼容登录内容位于跨域 iframe 的遮罩。店铺商品发现若公开商品总数已知但链接数不足，继续滚动/等待；在确认无更多或达到发现截止时间前不进入详情阶段。
 - 卖家账号页读取失败：保留详情商品记录，最多重试两次；最终进入下一个商品并记录卖家资料失败，不让整批任务卡死。
 - API 没有返回可识别商品：保留任务，允许用 DOM 模式重试；不能假报成功。
-- 图片单张失败：写入图片索引错误列，继续其它图片和整个 Excel。
+- 图片单张失败：继续其它图片和整个 Excel；用户选择“图片状态”字段时写入失败原因，未选择时在导出结果提示失败数量。
 - 下载失败：保留数据和历史，状态栏显示可再次手动下载。
 - 标签页被关闭：停止任务但不清空结果。
-- 页面消息没有回调：消息层在 12 秒后超时；当前阶段最多按既有重试次数重试，仍失败则记录详情 URL/阶段错误并继续或结束，不阻塞其它入口。
-- 活动任务超过 90 秒没有更新时间：读取任务状态时自动写入失败结论、保存历史快照、发送失败提示并释放全局任务锁；不会删除已经采集的数据。
+- 页面消息没有回调：普通消息层在 12 秒后超时；店铺商品发现消息允许 78 秒完成懒加载扫描。详情页消息失败时按当前 `detailSession` 的截止时间继续等待和必要的当前 URL 重新导航，不再用固定两次重试直接跳过当前商品；只有单链接截止时间到达才记录详情 URL/阶段错误并继续。
+- 单个任务超过 90 秒没有更新时间：只对该任务写入失败结论、保存历史快照、发送失败提示并清除该任务闹钟/标签页；不会删除已经采集的数据，也不会阻塞其它任务。
 - 搜索页没有可识别的下一页码或分页控件：结束任务并明确提示“未找到可用的下一页页码或分页控件”，不伪造成功。
+- 店铺全部商品发现数少于页面公开商品总数且没有明确“没有更多”提示：任务失败并保留“公开总数/已发现数/原因”，不把少量商品误报为全部完成；若页面明确没有更多但数量仍不一致，进入已发现详情采集并终态为 `partial`，同时保留差额告警。
 - 店铺评价加载未达到页面公开总数：导出“已采集评价数”，不声称已读取隐藏或未加载评价；已加载评价图片不受商品图片上限影响，另有 20000 张异常页面保护上限。
 - 监控链接类型不匹配：保存时直接拒绝并指出应使用商品详情链接或店铺账号页链接；单条监控运行时某个链接失败只记录该链接并继续后续链接，整轮没有任何成功结果时标记失败且不下载空工作簿。
 - 监控 Service Worker 重启：运行进度保存在 `xianyu_monitor_runs_v1`，同一监控使用独立闹钟从 `index` 继续；恢复前检查配置是否仍启用，暂停/删除不会被旧闹钟重新启动。
@@ -356,9 +371,13 @@ pause/delete ─► clear alarm + close monitor tab
 
 - 模拟搜索页每页 40 条、目标 100 条，验证跨约 3 页且只对详情 URL 采集。
 - 模拟重复商品 ID、重复图片、缺失标题和非法文件名。
-- 生成 xlsx 后检查 ZIP 内存在 `xl/media/*`、`xl/drawings/*` 和图片索引 sheet。
+- 用 `tests/detail-image-utils-smoke.mjs` 模拟单图轮播的缩略图、隐藏预览图、已售出遮罩和 CDN 尺寸变体，验证只保留一张主图；同时验证真实多图轮播不会被误合并。
+- 生成 xlsx 后检查商品工作簿的商品表中存在 `xl/media/*`、`xl/drawings/*`，且不生成商品图片索引 sheet；店铺工作簿检查评价图片位于“店铺评价综合”表对应评价行。
+- 模拟两个任务并发写入任务集合，验证任务中心不会因 read→write 交错而覆盖其中一个任务；模拟 `store-products` 详情消息，验证商品结果进入该任务的 `stagedItems` 而不是搜索列表或店铺表。
+- 模拟店铺公开商品数 12、首轮只发现 4 条，验证发现阶段不能完成；模拟发现数达到 12 条和页面明确没有更多两种边界，验证才允许进入详情阶段，并验证每个详情 URL 都创建新的 `detailSession`。
+- 模拟详情页连续未稳定返回，验证任务在当前 URL 的 45 秒会话截止时间内持续等待/重新导航，不能在固定两次重试后提前进入下一商品；截止后才记录失败并推进。
 - 模拟 API 缓冲先于 `START_API_CAPTURE` 到达，验证能被发送。
-- 模拟 `START_API_CAPTURE` 解析异常、后台消息无回调和旧 `collecting` 任务，验证都能在有限时间内得到响应，旧任务会自动释放锁。
+- 模拟 `START_API_CAPTURE` 解析异常、后台消息无回调和旧 `collecting` 任务，验证都能在有限时间内得到响应，旧任务只释放自己的资源，不影响其它任务。
 - 用店铺诊断 DOM 模拟 151 条评价和一条评价图片，验证店铺资料表、店铺评价综合表同时生成店铺资料、评价文本、评价图片字段和真实图片 drawing；详情 API 中的相关推荐不进入商品主表。
 - 模拟保存商品/店铺监控：验证链接类型隔离、每日时间转为下一次本地时间、相对下载文件夹持久化，以及商品/店铺配置不会写入普通任务键。
 - 模拟监控闹钟：验证“立即运行”使用独立运行状态，逐条失败仍推进到下一条，最后按类型调用商品或店铺导出，并重新安排下一次每日闹钟。
@@ -377,7 +396,7 @@ pause/delete ─► clear alarm + close monitor tab
 - 自动下载、手动下载和另存为选项各跑一遍。
 - 任务过程中关闭/重开侧边栏，确认任务继续。
 - 任务完成时收到页面内提示和系统通知（用户允许时）。
-- 店铺账号页点击“采集当前店铺页”，确认会滚动评价区域，完成后显示读取数量；导出后检查“店铺资料”表中的店铺字段，以及“店铺评价综合”表中评价字段和评价图片位于同一行。
-- 点击“一键导出页面诊断包”，验证 ZIP 至少包含实时 DOM、可见文字、链接、图片地址和网络响应 JSON。
+- 店铺账号页点击“采集当前店铺评价”，确认会滚动评价区域，完成后显示圆形完成状态和读取数量；导出后检查“店铺资料”表中的店铺字段，以及“店铺评价综合”表中评价字段和评价图片位于同一行。
+- 不提供页面诊断包导出入口；页面适配通过内部 DOM/图片候选回归测试完成，用户界面不暴露调试数据。
 - 在任务执行期间关闭/重新加载扩展，验证重新打开侧边栏后旧任务不会永久禁用当前详情、店铺、批量和搜索入口。
 - 在监控页分别保存商品监控和店铺监控，确认重开侧边栏和重启浏览器后配置仍在；点击“立即运行”确认专用标签页不激活、完成后自动关闭、文件下载到对应相对子文件夹且普通任务入口仍可点击。

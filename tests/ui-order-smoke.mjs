@@ -86,6 +86,27 @@ if (!contentSource.includes("bodyText.includes('短信登录')") || !contentSour
 }
 
 const panelSource = await fs.readFile(new URL('../sidepanel.js', import.meta.url), 'utf8');
+const panelHtml = await fs.readFile(new URL('../sidepanel.html', import.meta.url), 'utf8');
+const panelCss = await fs.readFile(new URL('../sidepanel.css', import.meta.url), 'utf8');
+if (!panelHtml.includes('id="detailSuccessCard"') || !panelHtml.includes('id="storeSuccessCard"')) {
+  throw new Error('current detail/store screens must have visible completion cards');
+}
+if (!panelSource.includes("setCollectionSuccess('detail', true") || !panelSource.includes("setCollectionSuccess('store', true")) {
+  throw new Error('current detail/store collection must show a completion state after success');
+}
+if (!panelCss.includes('.success-orb') || !panelCss.includes('.collection-success-card')) {
+  throw new Error('collection completion card styling is missing');
+}
+if (!panelHtml.includes('采集当前店铺数据') || !panelHtml.includes('采集店铺全部商品详情') || panelSource.includes("textContent = '采集当前店铺页'")) {
+  throw new Error('store screen should expose the umbrella store data entry and its two actions');
+}
+if (!panelHtml.includes('id="clearTasksButton"') || !panelHtml.includes('id="clearHistoryButton"')
+  || !panelSource.includes("type: 'CLEAR_JOBS'") || !panelSource.includes("type: 'CLEAR_HISTORY'")) {
+  throw new Error('task center and history clear-all actions are missing');
+}
+if (!panelSource.includes("type: 'GET_ITEM_STATUS'") || !panelSource.includes("重新采集当前详情页")) {
+  throw new Error('current detail history status and re-collect action are missing');
+}
 const panelBootStart = panelSource.indexOf("document.addEventListener('DOMContentLoaded'");
 if (panelBootStart < 0) throw new Error('sidepanel boot listener not found');
 const elements = new Map([

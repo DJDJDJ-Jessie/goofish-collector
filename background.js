@@ -1,9 +1,13 @@
 'use strict';
 
+if (typeof importScripts === 'function') importScripts('field-config.js');
+
 const STORAGE_KEY = 'xianyu_public_items_v1';
 const STORE_PROFILES_KEY = 'xianyu_public_store_profiles_v1';
 const JOB_KEY = 'xianyu_collect_job_v1';
+const JOBS_KEY = 'xianyu_collect_jobs_v2';
 const JOB_ALARM = 'xianyu_collect_job_alarm_v1';
+const JOB_ALARM_PREFIX = 'xianyu_collect_job_alarm_v2:';
 const SETTINGS_KEY = 'xianyu_collect_settings_v1';
 const HISTORY_KEY = 'xianyu_collect_history_v1';
 const MONITORS_KEY = 'xianyu_monitor_configs_v1';
@@ -18,8 +22,42 @@ const MAX_MONITORS = 100;
 const MAX_MONITOR_LINKS = 500;
 const TAB_MESSAGE_TIMEOUT_MS = 12000;
 const JOB_STALE_TIMEOUT_MS = 90000;
+const STORE_DISCOVERY_MESSAGE_TIMEOUT_MS = 78000;
+const DETAIL_SESSION_DEADLINE_MS = 45000;
+const DETAIL_SESSION_RENAVIGATE_EVERY = 2;
+const MAX_TASKS = 100;
 const cancelledJobIds = new Set();
 const monitorRunLocks = new Set();
+const pendingDownloadNames = new Map();
+let jobWriteQueue = Promise.resolve();
+
+function rememberDownloadName(url, filename) {
+  const key = String(url || '');
+  const value = String(filename || '');
+  if (!key || !value) return;
+  pendingDownloadNames.set(key, value);
+  const timer = setTimeout(() => {
+    if (pendingDownloadNames.get(key) === value) pendingDownloadNames.delete(key);
+  }, 60_000);
+  // Node-based smoke tests expose an unref-able timer; Chrome returns a numeric
+  // handle, so this is intentionally optional and has no browser-side effect.
+  timer?.unref?.();
+}
+
+function forgetDownloadName(url) {
+  pendingDownloadNames.delete(String(url || ''));
+}
+
+if (globalThis.chrome?.downloads?.onDeterminingFilename?.addListener) {
+  chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+    const keys = [downloadItem?.url, downloadItem?.finalUrl].filter(Boolean).map(String);
+    const matchedKey = keys.find(key => pendingDownloadNames.has(key));
+    const filename = matchedKey ? pendingDownloadNames.get(matchedKey) : '';
+    if (matchedKey) pendingDownloadNames.delete(matchedKey);
+    if (filename) suggest({ filename });
+    else suggest();
+  });
+}
 
 function markJobCancelled(jobId) {
   if (!jobId) return;
@@ -37,14 +75,25 @@ const DEFAULT_SETTINGS = Object.freeze({
   mode: 'rpa',
   downloadMode: 'manual',
   downloadFolder: '闲鱼研究采集',
-  fileNameTemplate: '闲鱼商品研究-{date}-{count}',
   saveAs: false,
   imageLimit: 0,
   maxEmbedImages: 1000,
   collectSellerInfo: true,
   notifyOnComplete: true,
-  keepHistoryDays: 30
+  keepHistoryDays: 30,
+  productFields: ['itemId', 'itemUrl', 'mainImageName', 'images', 'description', 'viewCount', 'wantCount', 'price', 'category', 'sellerName', 'sellerUrl', 'sellerLocation', 'sellerFollowers', 'sellerFollowing', 'sellerProductCount', 'sellerIntro', 'storeDuration', 'itemGoodRate', 'sellerReviewCount', 'collectedAt'],
+  storeProfileFields: ['sellerName', 'sellerUrl', 'sellerLocation', 'sellerFollowers', 'sellerFollowing', 'sellerProductCount', 'sellerIntro', 'sellerReviewCount', 'collectedAt'],
+  storeReviewFields: ['sellerName', 'sellerUrl', 'reviewIndex', 'reviewer', 'role', 'feedback', 'timeIp', 'reviewImageCount', 'reviewImageNames', 'reviewImageStatus', 'reviewImages', 'reviewImageFailureUrl', 'reviewCollectedAt']
 });
+
+const FIELD_CATALOG = globalThis.XianyuFieldConfig || {
+  fields: {},
+  defaults: {
+    product: DEFAULT_SETTINGS?.productFields || [],
+    storeProfile: DEFAULT_SETTINGS?.storeProfileFields || [],
+    storeReview: DEFAULT_SETTINGS?.storeReviewFields || []
+  }
+};
 
 const ARRAY_FIELDS = new Set(['images', 'reviewSamples']);
 const ALLOWED_FIELDS = [
@@ -70,7 +119,6 @@ const ALLOWED_FIELDS = [
   'sellerReviewSummary',
   'sellerReviewCount',
   'reviewSamples',
-  'publishedAt',
   'sourcePage',
   'dataSource',
   'collectedAt'
@@ -375,10 +423,15 @@ function normalizeSettings(input = {}) {
     .map(part => part.trim())
     .filter(part => part && part !== '.')
     .join('/');
-  const template = cleanText(input.fileNameTemplate ?? DEFAULT_SETTINGS.fileNameTemplate, 160)
-    .replace(/[\\/:*?"<>|]+/g, '_')
-    .replace(/\.xlsx$/i, '')
-    .trim() || DEFAULT_SETTINGS.fileNameTemplate;
+  const normalizeFieldSelection = (value, type, fallback) => {
+    const definitions = Array.isArray(FIELD_CATALOG.fields?.[type]) ? FIELD_CATALOG.fields[type] : [];
+    const valid = new Set(definitions.map(field => field.id));
+    const selected = Array.isArray(value)
+      ? [...new Set(value.map(field => cleanText(field, 100)).filter(field => valid.has(field)))]
+      : [];
+    if (selected.length) return selected;
+    return [...new Set((fallback || []).filter(field => valid.size === 0 || valid.has(field)))];
+  };
 
   return {
     ...DEFAULT_SETTINGS,
@@ -386,13 +439,15 @@ function normalizeSettings(input = {}) {
     mode: input.mode === 'api' ? 'api' : 'rpa',
     downloadMode: input.downloadMode === 'auto' ? 'auto' : 'manual',
     downloadFolder: folder || DEFAULT_SETTINGS.downloadFolder,
-    fileNameTemplate: template,
     saveAs: Boolean(input.saveAs),
     imageLimit: Math.max(0, Math.min(30, Number(input.imageLimit) || 0)),
     maxEmbedImages: Math.max(1, Math.min(1000, Number(input.maxEmbedImages) || DEFAULT_SETTINGS.maxEmbedImages)),
     collectSellerInfo: input.collectSellerInfo !== false,
     notifyOnComplete: input.notifyOnComplete !== false,
-    keepHistoryDays: Math.max(1, Math.min(365, Number(input.keepHistoryDays) || DEFAULT_SETTINGS.keepHistoryDays))
+    keepHistoryDays: Math.max(1, Math.min(365, Number(input.keepHistoryDays) || DEFAULT_SETTINGS.keepHistoryDays)),
+    productFields: normalizeFieldSelection(input.productFields, 'product', DEFAULT_SETTINGS.productFields),
+    storeProfileFields: normalizeFieldSelection(input.storeProfileFields, 'storeProfile', DEFAULT_SETTINGS.storeProfileFields),
+    storeReviewFields: normalizeFieldSelection(input.storeReviewFields, 'storeReview', DEFAULT_SETTINGS.storeReviewFields)
   };
 }
 
@@ -596,6 +651,7 @@ function historySummary(job, items, extra = {}) {
     failureRecords: jobFailureRecords(job),
     autoExportStatus: extra.autoExportStatus || '',
     fileName: extra.fileName || '',
+    storeName: cleanText(extra.storeName || job.storeName || '', 500),
     itemCount: Array.isArray(snapshot) ? snapshot.length : 0,
     itemsSnapshot: Array.isArray(snapshot) ? snapshot.slice(0, MAX_ITEMS) : [],
     storeProfilesSnapshot: Array.isArray(extra.storeProfilesSnapshot)
@@ -632,19 +688,109 @@ async function recordHistory(job, extra = {}) {
   }
 }
 
-async function readJob() {
-  const result = await chrome.storage.local.get(JOB_KEY);
-  return result[JOB_KEY] || null;
-}
-
-async function writeJob(job, options = {}) {
-  if (!options.force && isJobCancelled(job)) return readJob();
-  await chrome.storage.local.set({ [JOB_KEY]: job });
-  return job;
+function terminalJobStatus(status) {
+  return ['completed', 'partial', 'stopped', 'failed'].includes(status);
 }
 
 function jobIsActive(job) {
-  return Boolean(job && !['completed', 'partial', 'stopped', 'failed'].includes(job.status));
+  return Boolean(job && !terminalJobStatus(job.status) && job.status !== 'paused');
+}
+
+function jobIsManaged(job) {
+  return Boolean(job && !terminalJobStatus(job.status));
+}
+
+function jobAlarmName(jobId) {
+  const safeId = cleanText(jobId, 180).replace(/[^a-zA-Z0-9:_-]/g, '_');
+  return safeId ? `${JOB_ALARM_PREFIX}${safeId}` : JOB_ALARM;
+}
+
+function sortJobs(jobs) {
+  return (Array.isArray(jobs) ? jobs : [])
+    .filter(job => job && typeof job === 'object' && job.id)
+    .sort((first, second) => jobUpdatedAt(second) - jobUpdatedAt(first))
+    .slice(0, MAX_TASKS);
+}
+
+async function readJobs() {
+  let result = await chrome.storage.local.get([JOBS_KEY, JOB_KEY]);
+  // Some older Chrome test harnesses and extension shims only implement the
+  // string form of storage.get. Fall back without losing migration support.
+  if (!result || (!Object.prototype.hasOwnProperty.call(result, JOBS_KEY)
+    && !Object.prototype.hasOwnProperty.call(result, JOB_KEY))) {
+    const legacyResult = await chrome.storage.local.get(JOB_KEY);
+    result = { ...(legacyResult || {}) };
+  }
+  const stored = Array.isArray(result[JOBS_KEY]) ? result[JOBS_KEY] : [];
+  const legacy = result[JOB_KEY];
+  const merged = [...stored];
+  if (legacy?.id && !merged.some(job => job.id === legacy.id)) merged.push(legacy);
+  return sortJobs(merged);
+}
+
+function primaryJob(jobs) {
+  const list = sortJobs(jobs);
+  return list.find(jobIsActive) || list[0] || null;
+}
+
+async function readJob(jobId = '') {
+  const jobs = await readJobs();
+  if (jobId) return jobs.find(job => job.id === jobId) || null;
+  return primaryJob(jobs);
+}
+
+async function writeJobs(jobs) {
+  const normalized = sortJobs(jobs);
+  const primary = primaryJob(normalized);
+  await chrome.storage.local.set({
+    [JOBS_KEY]: normalized,
+    // Keep the old key during the migration so an interrupted extension update
+    // can still recover the most recent task.
+    [JOB_KEY]: primary
+  });
+  return normalized;
+}
+
+function writeJob(job, options = {}) {
+  // 多个任务可以同时推进；Service Worker 的 alarm/tabs 回调也可能交错到达。
+  // 如果这里直接 read -> write，两个任务会读到同一份旧数组，后写入的任务会
+  // 把先写入的任务覆盖掉，表现为任务中心“少了一条任务”。所有任务写入必须串行。
+  const operation = jobWriteQueue.then(async () => {
+    if (!job?.id) return readJob();
+    if (!options.force && isJobCancelled(job)) return readJob(job.id);
+    const jobs = await readJobs();
+    const next = jobs.filter(candidate => candidate.id !== job.id);
+    next.push(job);
+    await writeJobs(next);
+    return job;
+  });
+  jobWriteQueue = operation.catch(() => {});
+  return operation;
+}
+
+async function findJobByTabId(tabId, options = {}) {
+  const jobs = await readJobs();
+  return jobs.find(job => Number(job.tabId) === Number(tabId) && (options.managed ? jobIsManaged(job) : jobIsActive(job))) || null;
+}
+
+async function clearJobAlarm(jobId) {
+  await Promise.resolve(chrome.alarms.clear(jobAlarmName(jobId))).catch(() => {});
+  // Clear the legacy singleton alarm as well; it is only used by versions
+  // before the task-center migration.
+  await Promise.resolve(chrome.alarms.clear(JOB_ALARM)).catch(() => {});
+}
+
+async function clearAllJobs() {
+  const jobs = await readJobs();
+  jobs.forEach(job => markJobCancelled(job.id));
+  await Promise.all(jobs.map(job => clearJobAlarm(job.id)));
+  await clearJobAlarm('');
+  await Promise.all(jobs
+    .map(job => Number(job?.tabId))
+    .filter(tabId => Number.isInteger(tabId))
+    .map(tabId => tabsRemove(tabId).catch(() => {})));
+  await writeJobs([]);
+  return jobs.length;
 }
 
 function jobFailureRecords(job) {
@@ -732,7 +878,7 @@ function terminalStatus(status, job) {
 
 async function canContinueJob(job) {
   if (!job?.id || isJobCancelled(job)) return false;
-  const current = await readJob();
+  const current = await readJob(job.id);
   return Boolean(current && current.id === job.id && jobIsActive(current));
 }
 
@@ -767,7 +913,7 @@ async function recoverStaleJob(job) {
   return finishJob(
     { ...job, staleRecovered: true },
     'failed',
-    `${reason}（超过 ${Math.round(JOB_STALE_TIMEOUT_MS / 1000)} 秒），已自动释放任务锁；已经采集的数据仍保留，请重新开始。`
+    `${reason}（超过 ${Math.round(JOB_STALE_TIMEOUT_MS / 1000)} 秒），已自动释放该任务的采集资源；已经采集的数据仍保留，请重新开始。`
   );
 }
 
@@ -925,34 +1071,32 @@ function cleanDownloadPart(value, fallback = '未命名') {
   return cleaned || fallback;
 }
 
-function downloadFileName(settings, count, type, mode) {
-  const now = new Date();
-  const date = now.toISOString().slice(0, 10);
-  const time = now.toTimeString().slice(0, 8).replace(/:/g, '');
-  const values = {
-    date,
-    time,
-    count: String(count),
-    type: type === 'links'
-      ? '链接批量'
-      : type === 'store'
-        ? '店铺资料'
-        : type === 'monitor-product'
-          ? '商品监控'
-          : type === 'monitor-store'
-            ? '店铺监控'
-        : type === 'detail'
-          ? '当前详情'
-          : type === 'data'
-            ? '数据中心商品'
-            : '搜索跨页',
-    mode: mode === 'api' ? '接口观察' : '页面详情'
-  };
-  const base = cleanDownloadPart(
-    String(settings.fileNameTemplate || DEFAULT_SETTINGS.fileNameTemplate)
-      .replace(/\{(date|time|count|type|mode)\}/g, (_match, key) => values[key]),
-    '闲鱼商品研究'
+function exportStoreName(items, context = {}) {
+  const profileName = Array.isArray(context.storeProfiles)
+    ? context.storeProfiles.find(profile => cleanText(profile?.sellerName, 200))?.sellerName
+    : '';
+  const itemName = Array.isArray(items)
+    ? items.find(item => cleanText(item?.sellerName, 200))?.sellerName
+    : '';
+  return cleanDownloadPart(
+    context.storeName || profileName || itemName || '未知店铺',
+    '未知店铺'
   );
+}
+
+function exportTimestamp(now = new Date()) {
+  const part = value => String(value).padStart(2, '0');
+  return `${now.getFullYear()}${part(now.getMonth() + 1)}${part(now.getDate())}-${part(now.getHours())}${part(now.getMinutes())}`;
+}
+
+function downloadFileName(settings, count, type, mode, context = {}, items = []) {
+  const stamp = exportTimestamp();
+  const storeName = exportStoreName(items, context);
+  const base = type === 'store' || type === 'monitor-store'
+    ? `店铺评价-${storeName}-${stamp}`
+    : type === 'store-products'
+      ? `商品表-${storeName}-${stamp}`
+      : `商品${stamp}`;
   const folder = String(settings.downloadFolder || '')
     .split('/')
     .map(part => cleanDownloadPart(part, ''))
@@ -964,6 +1108,7 @@ function downloadFileName(settings, count, type, mode) {
 function runExport(items, settings, context = {}) {
   const task = async () => {
     await ensureOffscreenDocument();
+    const normalizedSettings = normalizeSettings(settings);
     const exportType = context.type || 'search';
     const isStoreExport = exportType === 'store' || exportType === 'monitor-store';
     const exportCount = isStoreExport
@@ -973,7 +1118,9 @@ function runExport(items, settings, context = {}) {
       settings,
       exportCount,
       exportType,
-      context.mode || settings.mode
+      context.mode || settings.mode,
+      context,
+      items
     );
     const prepared = await sendRuntimeMessage({
       type: 'OFFSCREEN_EXPORT',
@@ -981,7 +1128,12 @@ function runExport(items, settings, context = {}) {
       items: Array.isArray(items) ? items : [],
       storeProfiles: Array.isArray(context.storeProfiles) ? context.storeProfiles : [],
       exportKind: isStoreExport ? 'store' : 'product',
-      settings: normalizeSettings(settings),
+      settings: normalizedSettings,
+      fieldConfig: {
+        product: normalizedSettings.productFields,
+        storeProfile: normalizedSettings.storeProfileFields,
+        storeReview: normalizedSettings.storeReviewFields
+      },
       filename
     });
     if (!prepared?.ok || !prepared.url) {
@@ -989,6 +1141,7 @@ function runExport(items, settings, context = {}) {
     }
 
     let downloadId;
+    rememberDownloadName(prepared.url, filename);
     try {
       downloadId = await new Promise((resolve, reject) => {
         chrome.downloads.download({
@@ -1001,6 +1154,9 @@ function runExport(items, settings, context = {}) {
           else resolve(id);
         });
       });
+    } catch (error) {
+      forgetDownloadName(prepared.url);
+      throw error;
     } finally {
       await sendRuntimeMessage({
         type: 'OFFSCREEN_RELEASE',
@@ -1031,7 +1187,7 @@ async function ensureContentReceiver(tabId) {
     await executeScript({
       target: { tabId },
       world: 'ISOLATED',
-      files: ['content.js']
+      files: ['image-utils.js', 'content.js']
     });
     return sendTabMessage(tabId, { type: 'GET_PAGE_INFO' });
   }
@@ -1212,35 +1368,6 @@ async function readStableAccountProfile(tabId, options = {}) {
   throw lastError || new Error('卖家账号页资料尚未稳定加载，未写入商品字段。');
 }
 
-async function mergeStoredItemWithProfile(identity, profile) {
-  const items = await readItems();
-  const key = itemKey(identity || {});
-  const existing = items.find(item => itemKey(item) === key);
-  if (!existing || !profile) return false;
-
-  const patch = { ...existing };
-  for (const field of [
-    'sellerName', 'sellerUrl', 'sellerLocation', 'sellerFollowers', 'sellerFollowing',
-    'sellerProductCount', 'sellerIntro', 'sellerReviewSummary', 'sellerReviewCount'
-  ]) {
-    if (profile[field]) patch[field] = profile[field];
-  }
-  const profileGoodRate = rateText(profile.sellerGoodRate || '');
-  if (profileGoodRate && !rateText(patch.itemGoodRate || '')) {
-    // 详情页的 reviewSummary 可能是一段文案，但这不应阻止账号页的明确百分比
-    // 写入“商品好评率”；判断依据必须是目标字段是否已有合法百分比，而不是摘要是否为空。
-    patch.itemGoodRate = profileGoodRate;
-    if (!patch.reviewSummary || !rateText(patch.reviewSummary)) patch.reviewSummary = profileGoodRate;
-  }
-  if (Array.isArray(profile.reviewSamples) && profile.reviewSamples.length) {
-    patch.reviewSamples = profile.reviewSamples;
-  }
-  patch.dataSource = [existing.dataSource, 'account-dom'].filter(Boolean).join(',');
-  const merged = mergeItems(items, [patch]);
-  await writeItems(merged);
-  return true;
-}
-
 function applyProfileToItem(item, profile) {
   const base = sanitizeItem(item || {});
   if (!base || !profile) return base;
@@ -1358,10 +1485,147 @@ function collectedItemForLink(result, link) {
     ...(Array.isArray(result?.items) ? result.items : []),
     ...(Array.isArray(result?.stagedItems) ? result.stagedItems : [])
   ];
-  const itemId = cleanText(link?.itemId, 200);
+  const itemId = jobLinkItemId(link);
+  const linkUrl = jobLinkUrl(link);
   const exact = items.find(item => itemId && cleanText(item?.itemId, 200) === itemId)
-    || items.find(item => cleanUrl(item?.itemUrl || '') === cleanUrl(link?.itemUrl || ''));
+    || items.find(item => linkUrl && cleanUrl(item?.itemUrl || '') === linkUrl);
   return exact || items[0] || null;
+}
+
+// 链接批量任务保存的是字符串，店铺全部商品任务为了保留标题/卖家等
+// 发现信息保存的是对象。所有导航和失败记录必须先经过这一层归一化，
+// 不能把对象直接传给 tabs.update，否则会得到 url expected string。
+function jobLinkUrl(value) {
+  const rawCandidate = typeof value === 'string'
+    ? value
+    : value && typeof value === 'object'
+      ? (value.itemUrl || value.url || '')
+      : '';
+  const candidate = typeof rawCandidate === 'string' ? rawCandidate : '';
+  return validItemUrl(candidate) || cleanUrl(candidate || '');
+}
+
+function jobLinkItemId(value) {
+  const explicit = value && typeof value === 'object' ? cleanText(value.itemId, 200) : '';
+  return explicit || itemIdFromUrl(jobLinkUrl(value));
+}
+
+function createDetailSession(url) {
+  const normalizedUrl = jobLinkUrl(url);
+  const now = new Date().toISOString();
+  return {
+    id: `detail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    url: normalizedUrl,
+    startedAt: now,
+    attempts: 0,
+    reloads: 0,
+    lastError: ''
+  };
+}
+
+function ensureDetailSession(job, expectedUrl) {
+  const normalizedUrl = jobLinkUrl(expectedUrl);
+  const existing = job?.detailSession;
+  if (existing?.url === normalizedUrl && Date.parse(existing.startedAt || '') > 0) return job;
+  return {
+    ...job,
+    detailSession: createDetailSession(normalizedUrl)
+  };
+}
+
+function detailSessionElapsed(job) {
+  const startedAt = Date.parse(job?.detailSession?.startedAt || '');
+  return startedAt > 0 ? Math.max(0, Date.now() - startedAt) : 0;
+}
+
+function publicProductCountNumber(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const text = cleanText(value, 100).replace(/,/g, '');
+  const compact = text.match(/([\d]+(?:\.\d+)?)\s*(万|w)/i);
+  if (compact) {
+    const number = Number(compact[1]);
+    return Number.isFinite(number) && number >= 0 ? Math.round(number * 10000) : null;
+  }
+  const integer = text.match(/\d{1,9}/);
+  if (!integer) return null;
+  const number = Number(integer[0]);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function storeDiscoverySummary(result) {
+  const items = Array.isArray(result?.items) ? result.items : [];
+  const discoveredProductCount = Math.max(
+    0,
+    Number(result?.discoveredProductCount ?? result?.productCount ?? items.length) || 0
+  );
+  const publicProductCount = publicProductCountNumber(result?.publicProductCount);
+  const discoveryComplete = result?.discoveryComplete === true;
+  return {
+    publicProductCount,
+    discoveredProductCount,
+    discoveryComplete,
+    discoveryReason: cleanText(result?.discoveryReason || '', 100),
+    mismatch: publicProductCount !== null && discoveredProductCount < publicProductCount
+  };
+}
+
+function storeDiscoveryWarning(job, summary) {
+  if (!summary?.mismatch) return job;
+  const existing = Array.isArray(job?.qualityWarnings) ? job.qualityWarnings : [];
+  const warning = {
+    stage: 'store-discovery',
+    url: cleanUrl(job.storeUrl || ''),
+    itemId: '',
+    fields: ['店铺商品详情链接'],
+    error: `店铺公开商品数为 ${summary.publicProductCount}，最终只发现 ${summary.discoveredProductCount} 条商品详情链接。`
+  };
+  if (existing.some(entry => entry?.stage === warning.stage && entry?.url === warning.url)) return job;
+  return { ...job, qualityWarnings: [...existing, warning].slice(-100) };
+}
+
+async function retryDetailSession(job, expectedUrl, error) {
+  const normalizedJob = ensureDetailSession(job, expectedUrl);
+  const currentSession = normalizedJob.detailSession || createDetailSession(expectedUrl);
+  const attempts = Number(currentSession.attempts || 0) + 1;
+  const elapsed = detailSessionElapsed(normalizedJob);
+  const lastError = cleanText(error?.message || error || '详情页尚未稳定加载', 500);
+
+  if (elapsed >= DETAIL_SESSION_DEADLINE_MS) {
+    return advanceLinkJob({
+      ...normalizedJob,
+      detailSession: { ...currentSession, attempts, lastError }
+    }, `详情页在 ${Math.round(DETAIL_SESSION_DEADLINE_MS / 1000)} 秒内仍未稳定：${lastError}`);
+  }
+
+  let next = {
+    ...normalizedJob,
+    detailSession: { ...currentSession, attempts, lastError }
+  };
+  let message = `当前商品详情仍在加载，继续等待（已等待 ${Math.round(elapsed / 1000)} 秒）…`;
+
+  // 每隔两次稳定检查重新导航当前 URL，清掉单页应用残留状态；这仍然是
+  // 当前商品的同一详情会话，不会把失败直接推进到下一个商品。
+  if (attempts % DETAIL_SESSION_RENAVIGATE_EVERY === 0) {
+    try {
+      if (!(await canContinueJob(next))) return readJob(next.id);
+      await tabsUpdate(next.tabId, { url: normalizedJob.detailSession.url });
+      next = {
+        ...next,
+        detailSession: {
+          ...next.detailSession,
+          reloads: Number(next.detailSession.reloads || 0) + 1
+        }
+      };
+      message = `当前商品详情仍未稳定，已重新打开当前链接并继续等待（已等待 ${Math.round(elapsed / 1000)} 秒）…`;
+    } catch (navigationError) {
+      next.detailSession = {
+        ...next.detailSession,
+        lastError: `${lastError}；重新打开当前链接失败：${cleanText(navigationError?.message || navigationError, 300)}`
+      };
+    }
+  }
+
+  return scheduleJob(jobMessage({ ...next, status: 'waiting-page' }, message), 'ready-to-collect', 1800);
 }
 
 async function prepareSellerEnrichment(job, item, pendingCount) {
@@ -1386,9 +1650,10 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
   }
   if (!(await canContinueJob(job))) return { kind: 'cancelled', job: await readJob() };
   if (!sellerUrl) {
-    const currentLink = job.type === 'links'
+    const currentLink = ['links', 'store-products'].includes(job.type)
       ? job.links?.[job.index]
       : job.pageLinks?.[job.detailIndex];
+    const currentLinkUrl = jobLinkUrl(currentLink);
     return {
       kind: 'unavailable',
       job: appendQualityWarning({
@@ -1397,8 +1662,8 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
           ...(job.sellerFailures || []),
           {
             stage: 'seller-profile',
-            url: currentItem?.itemUrl || currentLink?.itemUrl || '',
-            itemId: currentItem?.itemId || currentLink?.itemId || '',
+            url: currentItem?.itemUrl || currentLinkUrl,
+            itemId: currentItem?.itemId || jobLinkItemId(currentLink),
             sellerUrl: '',
             error: '详情页未识别到可进入的卖家账号页，已保留商品结果；请记录此链接后补采店铺资料。'
           }
@@ -1462,13 +1727,13 @@ async function prepareSellerEnrichment(job, item, pendingCount) {
 }
 
 async function scheduleJob(job, status, delayMs = 1000) {
-  if (!(await canContinueJob(job))) return readJob();
+  if (!(await canContinueJob(job))) return readJob(job?.id);
   const next = jobMessage({ ...job, status }, job.message || '等待下一步');
   await writeJob(next);
-  if (!(await canContinueJob(next))) return readJob();
-  await chrome.alarms.clear(JOB_ALARM);
-  if (!(await canContinueJob(next))) return readJob();
-  chrome.alarms.create(JOB_ALARM, {
+  if (!(await canContinueJob(next))) return readJob(next.id);
+  await Promise.resolve(chrome.alarms.clear(jobAlarmName(next.id))).catch(() => {});
+  if (!(await canContinueJob(next))) return readJob(next.id);
+  chrome.alarms.create(jobAlarmName(next.id), {
     when: Date.now() + Math.max(250, Number(delayMs) || 1000)
   });
   return next;
@@ -1501,17 +1766,19 @@ async function notifyJobFinished(job, exportResult = null) {
 
 async function finishJob(job, status, message, options = {}) {
   const force = Boolean(options.force);
-  if (!force && isJobCancelled(job)) return readJob();
-  await chrome.alarms.clear(JOB_ALARM);
-  const current = await readJob();
-  if (!current || current.id !== job?.id || !jobIsActive(current) || (!force && isJobCancelled(job))) {
+  if (!force && isJobCancelled(job)) return readJob(job?.id);
+  await clearJobAlarm(job?.id);
+  const current = await readJob(job?.id);
+  if (!current || current.id !== job?.id
+    || (!jobIsActive(current) && !(force && current.status === 'paused'))
+    || (!force && isJobCancelled(job))) {
     return current || job;
   }
   const effectiveStatus = terminalStatus(status, force ? current : job);
   const finalJob = jobMessage({ ...(force ? current : job), status: effectiveStatus }, message);
   const persistedJob = await writeJob(finalJob, { force });
   if (!force && (isJobCancelled(job) || persistedJob?.id !== job.id || persistedJob?.status !== effectiveStatus)) {
-    return persistedJob || await readJob();
+    return persistedJob || await readJob(job.id);
   }
 
   if (status === 'stopped' && options.closeTaskTab && Number.isInteger(Number(finalJob.tabId))) {
@@ -1528,6 +1795,7 @@ async function finishJob(job, status, message, options = {}) {
         exportResult = await runExport(jobItems, settings, {
           type: finalJob.type,
           mode: finalJob.mode,
+          storeName: finalJob.storeName || '',
           // 商品任务只导出商品结果。店铺资料和评价必须通过“当前店铺页”单独导出，
           // 不能因为浏览器里有历史店铺资料就混入商品工作簿。
           storeProfiles: []
@@ -1551,6 +1819,7 @@ async function finishJob(job, status, message, options = {}) {
   await recordHistory(finalJob, {
     autoExportStatus: finalJob.autoExportStatus,
     fileName: finalJob.fileName,
+    storeName: finalJob.storeName || '',
     itemsSnapshot: jobItems,
     storeProfilesSnapshot: []
   });
@@ -1562,11 +1831,13 @@ async function advanceLinkJob(job, failureMessage = '') {
   if (!(await canContinueJob(job))) return readJob();
   const nextIndex = Number(job.index || 0) + 1;
   const failures = [...(job.failures || [])];
-  if (failureMessage && job.links?.[job.index]) {
+  const currentLink = job.links?.[job.index];
+  const currentLinkUrl = jobLinkUrl(currentLink);
+  if (failureMessage && currentLinkUrl) {
     failures.push({
       stage: 'detail-page',
-      url: job.links[job.index],
-      itemId: itemIdFromUrl(job.links[job.index]),
+      url: currentLinkUrl,
+      itemId: jobLinkItemId(currentLink),
       error: failureMessage
     });
   }
@@ -1578,10 +1849,16 @@ async function advanceLinkJob(job, failureMessage = '') {
     failures,
     retries: 0,
     pagesProcessed: nextIndex,
+    visited: ['store-products'].includes(job.type)
+      ? Number(job.visited || 0) + 1
+      : Number(job.visited || 0),
     pendingItem: null,
     pendingSellerUrl: '',
     pendingSellerKey: '',
-    pendingCount: 0
+    pendingCount: 0,
+    detailSession: nextIndex < job.links.length
+      ? createDetailSession(jobLinkUrl(job.links[nextIndex]))
+      : null
   };
 
   if (nextIndex >= job.links.length) {
@@ -1596,7 +1873,9 @@ async function advanceLinkJob(job, failureMessage = '') {
     if (!(await canContinueJob(next))) return readJob();
     await writeJob(waiting);
     if (!(await canContinueJob(waiting))) return readJob();
-    await tabsUpdate(job.tabId, { url: job.links[nextIndex] });
+    const nextLinkUrl = jobLinkUrl(job.links[nextIndex]);
+    if (!nextLinkUrl) return advanceLinkJob(next, '详情链接为空，无法打开该商品。');
+    await tabsUpdate(job.tabId, { url: nextLinkUrl });
     if (!(await canContinueJob(waiting))) return readJob();
     return scheduleJob(waiting, 'ready-to-collect', Math.max(1000, Number(job.delayMs) || 1400));
   } catch (error) {
@@ -1606,12 +1885,23 @@ async function advanceLinkJob(job, failureMessage = '') {
 
 async function processLinkJob(job) {
   if (!(await canContinueJob(job))) return readJob();
+  const currentLink = job.links?.[job.index];
+  const expectedUrl = jobLinkUrl(currentLink);
+  if (!expectedUrl) return advanceLinkJob(job, '详情链接为空，无法建立详情页加载会话。');
+
+  // 每个商品都拥有独立的逻辑详情会话：记录自己的 URL、开始时间、等待次数
+  // 和重新导航次数。物理上仍复用任务专用标签页，避免为一批商品打开几十个标签。
+  const sessionJob = ensureDetailSession(job, expectedUrl);
+  if (sessionJob !== job) {
+    await writeJob(jobMessage(sessionJob, `正在建立第 ${Number(job.index || 0) + 1} 个商品的详情页加载会话…`));
+    job = sessionJob;
+  }
+
   try {
     const pageInfo = await ensureContentReceiver(job.tabId);
     if (pageInfo?.pageType !== 'detail') {
       throw new Error('自动打开后当前标签页不是商品详情页，未写入非详情页面数据。');
     }
-    const expectedUrl = job.links?.[job.index] || '';
     if (expectedUrl && !itemUrlsMatch(pageInfo.url, expectedUrl)) {
       throw new Error('当前详情页链接与待采集商品不一致，已等待页面重新导航。');
     }
@@ -1623,7 +1913,7 @@ async function processLinkJob(job) {
       resultKeys: [...new Set([...(job.resultKeys || []), ...(result.keys || [])])],
       retries: 0
     };
-    const detailItem = collectedItemForLink(result, { itemUrl: job.links?.[job.index] || '' });
+    const detailItem = collectedItemForLink(result, currentLink);
     const enrichment = await prepareSellerEnrichment(next, detailItem, count);
     if (enrichment.kind === 'cancelled') return enrichment.job;
     if (enrichment.kind === 'scheduled') return enrichment.job;
@@ -1633,11 +1923,87 @@ async function processLinkJob(job) {
     });
   } catch (error) {
     if (isJobCancelled(job)) return readJob();
-    const retries = Number(job.retries || 0) + 1;
-    if (retries <= 2) {
-      return scheduleJob({ ...job, retries }, 'ready-to-collect', 1500);
+    return retryDetailSession(job, expectedUrl, error);
+  }
+}
+
+async function processStoreProductsPage(job) {
+  if (!(await canContinueJob(job))) return readJob(job.id);
+  try {
+    const pageInfo = await ensureContentReceiver(job.tabId);
+    if (pageInfo?.pageType !== 'account') throw new Error('当前页面不是店铺账号页，无法发现店铺商品。');
+    const result = await sendTabMessage(job.tabId, { type: 'GET_STORE_PRODUCT_LINKS' }, STORE_DISCOVERY_MESSAGE_TIMEOUT_MS);
+    if (!result?.ok) throw new Error(result?.error || '没有收到店铺商品链接');
+    const summary = storeDiscoverySummary(result);
+
+    // 只有“达到公开总数”或“页面明确没有更多商品”才允许进入详情阶段。
+    // 底部稳定但数量不足时继续让店铺页自己重扫；超过重试上限则失败，
+    // 不能把已发现的少量链接当成店铺全部商品而显示完成。
+    if (!summary.discoveryComplete) {
+      const retries = Number(job.storePageRetries || 0) + 1;
+      const waiting = {
+        ...job,
+        storePageRetries: retries,
+        targetCount: summary.publicProductCount ?? job.targetCount,
+        publicProductCount: summary.publicProductCount,
+        discoveredProductCount: summary.discoveredProductCount,
+        discoveryComplete: false,
+        discoveryReason: summary.discoveryReason,
+        message: result.error || '店铺商品链接尚未全部加载，正在继续等待店铺页完成渲染…'
+      };
+      if (retries <= 2) return scheduleJob(jobMessage(waiting, waiting.message), 'ready-to-collect', 2800);
+      return finishJob(
+        waiting,
+        'failed',
+        result.error || `店铺商品链接发现未完成：公开商品 ${summary.publicProductCount ?? '未知'}，已发现 ${summary.discoveredProductCount} 条。`
+      );
     }
-    return advanceLinkJob({ ...job, retries: 0 }, error.message || String(error));
+
+    const byKey = new Map();
+    for (const raw of Array.isArray(result.items) ? result.items : []) {
+      const item = compactSearchLink(raw);
+      const key = searchLinkKey(item);
+      if (item && key && !byKey.has(key)) byKey.set(key, item);
+    }
+    const links = [...byKey.values()];
+    if (!links.length) {
+      if (summary.publicProductCount === 0) {
+        return finishJob(job, 'completed', '店铺页面明确没有公开商品详情链接。');
+      }
+      const retries = Number(job.storePageRetries || 0) + 1;
+      if (retries <= 3) return scheduleJob({ ...job, storePageRetries: retries }, 'ready-to-collect', 2600);
+      return finishJob(job, 'failed', '店铺页没有发现可进入的商品详情链接；请确认店铺商品列表已经加载完成。');
+    }
+
+    const nextBase = {
+      ...job,
+      stage: 'detail-page',
+      links,
+      index: 0,
+      targetCount: summary.publicProductCount ?? links.length,
+      publicProductCount: summary.publicProductCount,
+      discoveredProductCount: links.length,
+      discoveryComplete: true,
+      discoveryReason: summary.discoveryReason,
+      storePageRetries: 0,
+      pagesProcessed: 1,
+      retries: 0,
+      detailSession: createDetailSession(jobLinkUrl(links[0])),
+      message: summary.mismatch
+        ? `店铺公开商品 ${summary.publicProductCount} 个，当前只发现 ${links.length} 个；正在逐个采集已发现详情页…`
+        : `已从店铺页确认 ${links.length} 个商品详情链接，正在打开第 1 个详情页…`
+    };
+    const next = storeDiscoveryWarning(nextBase, summary);
+    const waiting = jobMessage({ ...next, status: 'waiting-page' }, next.message);
+    await writeJob(waiting);
+    const firstLinkUrl = jobLinkUrl(links[0]);
+    if (!firstLinkUrl) throw new Error('店铺页发现了无效商品详情链接。');
+    await tabsUpdate(job.tabId, { url: firstLinkUrl });
+    return scheduleJob(waiting, 'ready-to-collect', Math.max(1700, Number(job.delayMs) || 1800));
+  } catch (error) {
+    const retries = Number(job.retries || 0) + 1;
+    if (retries <= 2) return scheduleJob({ ...job, retries }, 'ready-to-collect', 1800);
+    return finishJob({ ...job, retries }, 'failed', `店铺商品链接发现失败：${error.message || String(error)}`);
   }
 }
 
@@ -2019,7 +2385,7 @@ async function finishPendingSellerStep(job, profile = null, errorMessage = '') {
     };
   }
 
-  if (job.type === 'links') {
+  if (['links', 'store-products'].includes(job.type)) {
     return advanceLinkJob({
       ...next,
       collected: Number(job.collected || 0) + count
@@ -2047,34 +2413,37 @@ async function processAccountPage(job) {
   }
 }
 
-async function processJobAlarm() {
-  const rawJob = await readJob();
+async function processJobAlarm(alarmName = JOB_ALARM) {
+  const jobId = String(alarmName || '').startsWith(JOB_ALARM_PREFIX)
+    ? String(alarmName).slice(JOB_ALARM_PREFIX.length)
+    : '';
+  const rawJob = await readJob(jobId);
   if (!rawJob || !jobIsActive(rawJob) || rawJob.status !== 'ready-to-collect') return;
-  if (!(await canContinueJob(rawJob))) return readJob();
+  if (!(await canContinueJob(rawJob))) return readJob(rawJob.id);
 
   const job = normalizeSearchJob(rawJob);
   const collectingMessage = job.stage === 'account-page'
     ? '正在读取卖家账号页的公开简介和评价…'
+    : job.type === 'store-products' && job.stage === 'store-page'
+      ? '正在读取店铺页的全部商品详情链接…'
     : job.type === 'search' && job.stage === 'search-page'
       ? '正在读取当前搜索页的商品详情链接…'
       : '正在采集当前商品详情页…';
   const collecting = { ...job, status: 'collecting' };
   await writeJob(jobMessage(collecting, collectingMessage));
-  if (!(await canContinueJob(collecting))) return readJob();
+  if (!(await canContinueJob(collecting))) return readJob(collecting.id);
   if (job.stage === 'account-page') await processAccountPage(collecting);
-  else if (job.type === 'links') await processLinkJob(collecting);
+  else if (job.type === 'store-products' && job.stage === 'store-page') await processStoreProductsPage(collecting);
+  else if (['links', 'store-products'].includes(job.type)) await processLinkJob(collecting);
   else if (job.type === 'search' && job.stage === 'detail-page') await processSearchDetail(collecting);
   else if (job.type === 'search') await processSearchPage(collecting);
 }
 
 async function startLinksJob(links, delayMs = 1500, mode = 'rpa') {
-  const current = await recoverStaleJob(await readJob());
-  if (jobIsActive(current)) throw new Error('已有采集任务正在运行，请先停止当前任务。');
-
   const settings = await readSettings();
   const tab = await tabsCreate({ url: links[0], active: false });
   const job = {
-    id: `links-${Date.now()}`,
+    id: `links-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     type: 'links',
     mode: mode === 'api' ? 'api' : 'rpa',
     status: 'waiting-page',
@@ -2094,6 +2463,7 @@ async function startLinksJob(links, delayMs = 1500, mode = 'rpa') {
     retries: 0,
     delayMs: Math.max(1000, Number(delayMs) || 1500),
     tabId: tab.id,
+    detailSession: createDetailSession(links[0]),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     message: `已打开采集标签页，共 ${links.length} 个链接。`
@@ -2102,10 +2472,58 @@ async function startLinksJob(links, delayMs = 1500, mode = 'rpa') {
   return scheduleJob(job, 'ready-to-collect', 1400);
 }
 
-async function startSearchJob(startUrl, targetCount, maxPages, delayMs = 1800, mode = 'rpa') {
-  const current = await recoverStaleJob(await readJob());
-  if (jobIsActive(current)) throw new Error('已有采集任务正在运行，请先停止当前任务。');
+async function startStoreProductsJob(storeUrl, delayMs = 1800, mode = 'rpa', storeName = '') {
+  let parsed;
+  try {
+    parsed = new URL(storeUrl);
+  } catch (_) {
+    throw new Error('采集店铺全部商品需要有效的闲鱼店铺页链接。');
+  }
+  if (!parsed.hostname.endsWith('goofish.com') || !/^\/personal(?:[/?#]|$)/i.test(parsed.pathname)) {
+    throw new Error('采集店铺全部商品只能从闲鱼店铺/账号页启动。');
+  }
+  const settings = await readSettings();
+  const tab = await tabsCreate({ url: storeUrl, active: false });
+  const now = new Date().toISOString();
+  const job = {
+    id: `store-products-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    type: 'store-products',
+    mode: mode === 'api' ? 'api' : 'rpa',
+    storeName: cleanText(storeName, 500),
+    status: 'waiting-page',
+    stage: 'store-page',
+    storeUrl: cleanUrl(storeUrl),
+    links: [],
+    index: 0,
+    targetCount: 0,
+    publicProductCount: null,
+    discoveredProductCount: 0,
+    discoveryComplete: false,
+    discoveryReason: '',
+    pagesProcessed: 0,
+    collected: 0,
+    visited: 0,
+    stagedItems: [],
+    committedToDataCenter: false,
+    resultKeys: [],
+    sellerProfiles: {},
+    sellerFailures: [],
+    qualityWarnings: [],
+    collectSellerInfo: settings.collectSellerInfo !== false,
+    failures: [],
+    retries: 0,
+    storePageRetries: 0,
+    delayMs: Math.max(1500, Number(delayMs) || 1800),
+    tabId: tab.id,
+    createdAt: now,
+    updatedAt: now,
+    message: '已打开店铺采集标签页，正在读取店铺下的全部公开商品…'
+  };
+  await writeJob(job);
+  return scheduleJob(job, 'ready-to-collect', 1800);
+}
 
+async function startSearchJob(startUrl, targetCount, maxPages, delayMs = 1800, mode = 'rpa') {
   let parsedStart;
   try {
     parsedStart = new URL(startUrl);
@@ -2119,7 +2537,7 @@ async function startSearchJob(startUrl, targetCount, maxPages, delayMs = 1800, m
   const settings = await readSettings();
   const tab = await tabsCreate({ url: startUrl, active: false });
   const job = {
-    id: `search-${Date.now()}`,
+    id: `search-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     type: 'search',
     mode: mode === 'api' ? 'api' : 'rpa',
     status: 'waiting-page',
@@ -2474,6 +2892,24 @@ async function syncMonitorAlarms() {
   return monitors;
 }
 
+async function restoreActiveJobs() {
+  const jobs = await readJobs();
+  for (const job of jobs) {
+    if (!jobIsActive(job)) continue;
+    await recoverStaleJob(job).catch(() => {});
+    const current = await readJob(job.id);
+    if (!jobIsActive(current)) continue;
+    // A service-worker restart can lose one-shot alarms. Re-queue every
+    // runnable task independently so returning to the side panel never hides
+    // a task or leaves it permanently stuck.
+    if (current.status === 'ready-to-collect') {
+      await scheduleJob(current, current.status, 450).catch(() => {});
+    } else if (current.status === 'waiting-page') {
+      await scheduleJob(current, 'ready-to-collect', 900).catch(() => {});
+    }
+  }
+}
+
 async function configureSidePanel() {
   if (!chrome.sidePanel?.setPanelBehavior) return;
   await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -2488,11 +2924,13 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (!Array.isArray(monitorsResult[MONITORS_KEY])) await writeMonitors([]);
   await syncMonitorAlarms();
   await configureSidePanel();
+  await restoreActiveJobs();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   void configureSidePanel();
   void syncMonitorAlarms();
+  void restoreActiveJobs();
 });
 
 chrome.action.onClicked.addListener(tab => {
@@ -2503,7 +2941,7 @@ chrome.action.onClicked.addListener(tab => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status !== 'complete') return;
   void (async () => {
-    const job = await readJob();
+    const job = await findJobByTabId(tabId);
     if (!job || job.tabId !== tabId || !jobIsActive(job)) return;
     if (job.status === 'waiting-page') {
       await scheduleJob(job, 'ready-to-collect', job.type === 'links' ? 1000 : 1500);
@@ -2513,15 +2951,16 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
 chrome.tabs.onRemoved.addListener(tabId => {
   void (async () => {
-    const job = await readJob();
-    if (!job || job.tabId !== tabId || !jobIsActive(job)) return;
+    const job = await findJobByTabId(tabId, { managed: true });
+    if (!job || job.tabId !== tabId || !jobIsManaged(job)) return;
     await finishJob(job, 'stopped', '采集专用标签页被关闭，任务已停止。');
   })();
 });
 
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === JOB_ALARM) void processJobAlarm();
-  else if (alarm.name?.startsWith(MONITOR_ALARM_PREFIX)) {
+  if (alarm.name === JOB_ALARM || String(alarm.name || '').startsWith(JOB_ALARM_PREFIX)) {
+    void processJobAlarm(alarm.name);
+  } else if (alarm.name?.startsWith(MONITOR_ALARM_PREFIX)) {
     const monitorId = alarm.name.slice(MONITOR_ALARM_PREFIX.length);
     void (async () => {
       const run = await readMonitorRun(monitorId);
@@ -2548,7 +2987,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     switch (message?.type) {
       case 'COLLECT_ITEMS': {
         const pageUrl = sender?.tab?.url || message.sourcePage || '';
-        const activeJobBeforeWrite = await readJob();
+        const activeJobBeforeWrite = await findJobByTabId(sender?.tab?.id);
         if (message.pageType && message.pageType !== 'detail') {
           return {
             ok: true,
@@ -2575,12 +3014,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           .map(item => sanitizeItem({ ...item, sourcePage: item.sourcePage || pageUrl }, pageUrl))
           .filter(Boolean);
         const resultKeys = incoming.map(itemKey);
-        const activeJob = activeJobBeforeWrite || await readJob();
+        const activeJob = activeJobBeforeWrite;
         const belongsToActiveTask = Boolean(
           activeJob
           && jobIsActive(activeJob)
           && activeJob.tabId === sender?.tab?.id
-          && ['links', 'search'].includes(activeJob.type)
+          && ['links', 'search', 'store-products'].includes(activeJob.type)
         );
 
         // 详情页单采和批量任务默认只写入“本次结果暂存区”。这样用户可以先检查结果，
@@ -2657,8 +3096,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'COMMIT_JOB_RESULT': {
-        const job = await readJob();
-        if (!job || (message.jobId && job.id !== message.jobId)) {
+        const job = await readJob(message.jobId || '');
+        if (!job) {
           throw new Error('当前任务结果不存在或已经被替换。');
         }
         const incoming = Array.isArray(job.stagedItems) ? job.stagedItems : [];
@@ -2824,16 +3263,52 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return { ok: true, run, monitors: await monitorView() };
       }
 
-      case 'GET_STORE_STATUS': {
-        const sellerUrl = validSellerUrl(message.sellerUrl || sender?.tab?.url || '');
-        const profiles = await readStoreProfiles();
-        const key = sellerProfileKey(sellerUrl);
-        const profile = key
-          ? profiles.find(item => sellerProfileKey(item?.sellerUrl || '') === key) || null
-          : null;
+      case 'GET_ITEM_STATUS': {
+        const requestedUrl = validItemUrl(message.itemUrl || '') || cleanUrl(message.itemUrl || '');
+        const requestedId = cleanText(message.itemId || itemIdFromUrl(requestedUrl), 200);
+        const [items, history, jobs] = await Promise.all([
+          readItems(),
+          readHistory(),
+          readJobs()
+        ]);
+        const historicalItems = [
+          ...history.flatMap(entry => Array.isArray(entry?.itemsSnapshot) ? entry.itemsSnapshot : []),
+          ...jobs.flatMap(job => Array.isArray(job?.stagedItems) ? job.stagedItems : [])
+        ];
+        const item = [...items, ...historicalItems].find(candidate => (
+          (requestedId && cleanText(candidate?.itemId, 200) === requestedId)
+          || (requestedUrl && itemUrlsMatch(candidate?.itemUrl || '', requestedUrl))
+        )) || null;
         return {
           ok: true,
-          exists: Boolean(profile),
+          exists: Boolean(item),
+          source: item && items.includes(item) ? 'data-center' : item ? 'history' : '',
+          item: item ? {
+            itemId: item.itemId || '',
+            itemUrl: item.itemUrl || '',
+            sellerName: item.sellerName || '',
+            collectedAt: item.collectedAt || ''
+          } : null
+        };
+      }
+
+      case 'GET_STORE_STATUS': {
+        const sellerUrl = validSellerUrl(message.sellerUrl || sender?.tab?.url || '');
+        const [profiles, history] = await Promise.all([readStoreProfiles(), readHistory()]);
+        const key = sellerProfileKey(sellerUrl);
+        const storedProfile = key
+          ? profiles.find(item => sellerProfileKey(item?.sellerUrl || '') === key) || null
+          : null;
+        const historicalProfile = key
+          ? history
+            .flatMap(entry => Array.isArray(entry?.storeProfilesSnapshot) ? entry.storeProfilesSnapshot : [])
+            .find(item => sellerProfileKey(item?.sellerUrl || '') === key) || null
+          : null;
+        const profile = storedProfile || historicalProfile;
+        return {
+          ok: true,
+          exists: Boolean(storedProfile),
+          historyExists: Boolean(storedProfile || historicalProfile),
           storeCount: profiles.length,
           profile: profile ? {
             sellerName: profile.sellerName,
@@ -2864,6 +3339,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await writeHistory([]);
         return { ok: true, history: [] };
 
+      case 'CLEAR_JOBS':
+        return { ok: true, cleared: await clearAllJobs(), jobs: [] };
+
       case 'EXPORT_ITEMS': {
         const settings = await readSettings();
         const taskType = message.taskType || 'data';
@@ -2884,14 +3362,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const result = await runExport(items, settings, {
           type: taskType,
           mode: message.mode || settings.mode,
+          storeName: cleanText(message.storeName || '', 500),
           storeProfiles
         });
         return { ok: true, result };
       }
 
       case 'EXPORT_JOB_RESULT': {
-        const job = await readJob();
-        if (!job || (message.jobId && job.id !== message.jobId)) {
+        const job = await readJob(message.jobId || '');
+        if (!job) {
           throw new Error('当前任务结果不存在或已经被替换。');
         }
         const settings = await readSettings();
@@ -2901,6 +3380,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const result = await runExport(items, settings, {
           type: job.type,
           mode: job.mode || settings.mode,
+          storeName: job.storeName || '',
           storeProfiles: []
         });
         return { ok: true, result };
@@ -2915,6 +3395,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const result = await runExport(isStoreHistory ? [] : (entry.itemsSnapshot || []), settings, {
           type: entry.type,
           mode: entry.mode,
+          storeName: entry.storeName || '',
           storeProfiles: isStoreHistory && Array.isArray(entry.storeProfilesSnapshot)
             ? entry.storeProfilesSnapshot
             : []
@@ -2932,7 +3413,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return { ok: true, count: 0 };
 
       case 'GET_JOB_STATUS':
-        return { ok: true, job: await recoverStaleJob(await readJob()) };
+        return { ok: true, job: await recoverStaleJob(await readJob(message.jobId || '')) };
+
+      case 'GET_JOBS': {
+        const jobs = [];
+        for (const job of await readJobs()) {
+          jobs.push(await recoverStaleJob(job));
+        }
+        return { ok: true, jobs: sortJobs(jobs) };
+      }
 
       case 'START_BATCH_LINKS': {
         const links = [...new Set((Array.isArray(message.links) ? message.links : [])
@@ -2954,9 +3443,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         };
       }
 
+      case 'START_STORE_PRODUCTS': {
+        const storeUrl = cleanUrl(message.storeUrl || sender?.tab?.url || '');
+        if (!storeUrl || !storeUrl.includes('goofish.com')) throw new Error('请先在闲鱼店铺/账号页启动店铺商品采集。');
+        const settings = await readSettings();
+        return {
+          ok: true,
+          job: await startStoreProductsJob(
+            storeUrl,
+            message.delayMs,
+            message.mode || settings.mode,
+            message.storeName || ''
+          )
+        };
+      }
+
       case 'STOP_JOB': {
-        const job = await readJob();
-        if (!job || !jobIsActive(job)) return { ok: true, job };
+        const job = await readJob(message.jobId || '');
+        if (!job || (!jobIsActive(job) && job.status !== 'paused')) return { ok: true, job };
         markJobCancelled(job.id);
         const stopped = await finishJob(
           job,
@@ -2965,6 +3469,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           { force: true, closeTaskTab: true }
         );
         return { ok: true, job: stopped };
+      }
+
+      case 'PAUSE_JOB': {
+        const job = await readJob(message.jobId || '');
+        if (!job || !jobIsActive(job)) return { ok: true, job };
+        await clearJobAlarm(job.id);
+        const paused = jobMessage({ ...job, status: 'paused' }, '任务已暂停，可在任务中心继续。');
+        await writeJob(paused, { force: true });
+        return { ok: true, job: paused };
+      }
+
+      case 'RESUME_JOB': {
+        const job = await readJob(message.jobId || '');
+        if (!job || job.status !== 'paused') return { ok: true, job };
+        const resumed = jobMessage({ ...job, status: 'ready-to-collect' }, '任务已继续，正在恢复采集…');
+        await writeJob(resumed, { force: true });
+        return { ok: true, job: await scheduleJob(resumed, 'ready-to-collect', 350) };
       }
 
       default:

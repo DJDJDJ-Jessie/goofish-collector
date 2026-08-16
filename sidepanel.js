@@ -6,13 +6,15 @@
     mode: 'rpa',
     downloadMode: 'manual',
     downloadFolder: '闲鱼研究采集',
-    fileNameTemplate: '闲鱼商品研究-{date}-{count}',
     saveAs: false,
     imageLimit: 0,
     maxEmbedImages: 1000,
     collectSellerInfo: true,
     notifyOnComplete: true,
-    keepHistoryDays: 30
+    keepHistoryDays: 30,
+    productFields: [],
+    storeProfileFields: [],
+    storeReviewFields: []
   };
   const TAB_MESSAGE_TIMEOUT_MS = 12000;
 
@@ -25,6 +27,7 @@
   let screenParent = 'home';
   let currentPageType = '';
   let storeDataReady = false;
+  let currentItemStatus = { exists: false, item: null };
   let currentStoreStatus = { exists: false, profile: null };
   let pendingCurrentItems = [];
   let pendingCurrentSourceUrl = '';
@@ -37,17 +40,22 @@
   let monitorKind = 'product';
   let editingMonitorId = '';
   let monitorConfigs = [];
+  let taskJobs = [];
+  let selectedTaskId = '';
+  let fieldConfigDraft = null;
+  let fieldConfigType = 'product';
 
   const SCREEN_META = {
     home: { kicker: 'WORKSPACE', title: '闲鱼研究助手', subtitle: '从公开详情页整理同行商品与店铺信息' },
     detail: { kicker: 'CURRENT DETAIL', title: '采集当前详情', subtitle: '读取此刻打开的商品详情页' },
-    store: { kicker: 'CURRENT STORE', title: '采集当前店铺页', subtitle: '分别读取店铺资料与店铺评价图片' },
+    store: { kicker: 'CURRENT STORE', title: '采集当前店铺数据', subtitle: '读取评价，或采集店铺全部商品详情' },
     links: { kicker: 'BATCH INPUT', title: '批量商品链接', subtitle: '自动逐个打开商品详情页' },
     search: { kicker: 'SEARCH CRAWL', title: '搜索跨页采集', subtitle: '按页码推进，并逐个进入详情页' },
-    data: { kicker: 'LOCAL DATASET', title: '数据中心', subtitle: '查看记录、下载 Excel 和图片索引' },
+    data: { kicker: 'LOCAL DATASET', title: '数据中心', subtitle: '查看记录、下载 Excel 和真实图片' },
     history: { kicker: 'TASK ARCHIVE', title: '采集历史', subtitle: '查看任务结果，重新导出或删除' },
     settings: { kicker: 'WORKSPACE SETTINGS', title: '下载与字段设置', subtitle: '控制下载方式、图片和卖家公开资料' },
     monitor: { kicker: 'MONITORING DESK', title: '商品监控', subtitle: '按每日计划获取商品或店铺公开数据' },
+    tasks: { kicker: 'TASK CENTER', title: '任务中心', subtitle: '查看多个任务的状态和结果' },
     task: { kicker: 'TASK RUNNER', title: '处理任务', subtitle: '查看逐个详情页的采集进度' }
   };
 
@@ -63,7 +71,11 @@
     if (push && currentScreen !== target) {
       // 一级功能页统一回首页，只有“任务 → 数据中心”保留一个明确的返回关系。
       // 不再累积历史栈，避免设置页、详情页之间来回跳转。
-      screenParent = parent || (target === 'data' && currentScreen === 'task' ? 'task' : 'home');
+      screenParent = parent || (target === 'data' && currentScreen === 'task'
+        ? 'task'
+        : target === 'task' && currentScreen === 'tasks'
+          ? 'tasks'
+          : 'home');
     }
     currentScreen = target;
     document.querySelectorAll('[data-screen]').forEach(screen => {
@@ -82,9 +94,14 @@
   }
 
   function goBack() {
-    const previous = screenParent || 'home';
+    // 任务详情是从任务中心进入的，返回必须回到任务中心；其它一级功能页
+    // 统一回首页。不要依赖一个可被后续轮询覆盖的“当前任务”来决定返回目的地。
+    const previous = currentScreen === 'task'
+      ? (screenParent === 'tasks' ? 'tasks' : 'home')
+      : (screenParent || 'home');
     screenParent = 'home';
     showScreen(previous, false);
+    if (previous === 'tasks') void refreshTasks().catch(() => {});
   }
 
   function isGoofishUrl(url) {
@@ -139,6 +156,15 @@
     node.className = `status ${kind}`.trim();
   }
 
+  function setCollectionSuccess(type, visible, summary = '') {
+    const isStore = type === 'store';
+    const card = $(isStore ? 'storeSuccessCard' : 'detailSuccessCard');
+    const summaryNode = $(isStore ? 'storeSuccessSummary' : 'detailSuccessSummary');
+    if (!card) return;
+    card.classList.toggle('is-hidden', !visible);
+    if (summary && summaryNode) summaryNode.textContent = summary;
+  }
+
   function renderCurrentResultActions() {
     const hasItems = pendingCurrentItems.length > 0;
     const commitButton = $('currentCommitButton');
@@ -149,6 +175,7 @@
       commitButton.textContent = currentItemsCommitted ? '已加入数据中心商品表' : '加到数据中心商品表';
     }
     if (exportButton) exportButton.disabled = !hasItems;
+    renderDetailStatus(currentPageType, currentItemStatus);
     if (hint && !hasItems) {
       hint.textContent = '采集完成后可以选择：加入数据中心商品总表，或只导出当前这一条商品。';
     }
@@ -158,13 +185,46 @@
     pendingCurrentItems = [];
     pendingCurrentSourceUrl = '';
     currentItemsCommitted = false;
+    currentItemStatus = { exists: false, item: null };
+    setCollectionSuccess('detail', false);
     renderCurrentResultActions();
+  }
+
+  function renderDetailStatus(pageType, status = {}) {
+    currentItemStatus = status || { exists: false, item: null };
+    const collectButton = $('collectButton');
+    const state = $('currentState');
+    const hint = $('currentCollectHint');
+    if (!collectButton || pageType !== 'detail') {
+      if (collectButton && pageType !== 'detail') collectButton.textContent = '采集当前详情页';
+      return;
+    }
+
+    if (pendingCurrentItems.length) {
+      collectButton.textContent = '重新采集当前详情页';
+      if (state) state.textContent = '本次已采集';
+      if (hint && !hint.textContent.includes('请选择')) {
+        hint.textContent = '本次详情页结果已暂存；再次点击“重新采集当前详情页”会重新读取当前页面，不会直接使用历史结果。';
+      }
+      return;
+    }
+
+    if (currentItemStatus.exists) {
+      collectButton.textContent = '重新采集当前详情页';
+      if (state) state.textContent = '历史已采集';
+      if (hint) hint.textContent = '当前商品已有历史采集记录；点击“重新采集当前详情页”会重新读取当前页面，不会用历史记录代替本次采集。';
+      return;
+    }
+
+    collectButton.textContent = '采集当前详情页';
+    if (state) state.textContent = '可采集';
   }
 
   function clearCurrentStoreResult() {
     pendingCurrentStoreProfile = null;
     pendingCurrentStoreSourceUrl = '';
     currentStoreCommitted = false;
+    setCollectionSuccess('store', false);
     renderStoreStatus(currentPageType, currentStoreStatus);
   }
 
@@ -465,6 +525,7 @@
     currentStoreStatus = status || { exists: false, profile: null };
     const isAccount = pageType === 'account';
     const profile = currentStoreStatus.profile || null;
+    const hasStoreHistory = Boolean(currentStoreStatus.exists || currentStoreStatus.historyExists);
     const reviewCount = Number(profile?.reviewCount || 0);
     const collectedAt = profile?.collectedAt ? formatDate(profile.collectedAt) : '';
     const collectButton = $('storeCollectButton');
@@ -473,17 +534,18 @@
     const storeCommitButton = $('storeCommitButton');
     const hasStoreData = hasCurrentStoreData();
     const hasPendingStore = Boolean(pendingCurrentStoreProfile);
+    const currentTaskOwnsTab = Boolean(currentTaskJob?.tabId && activeTab?.id && Number(currentTaskJob.tabId) === Number(activeTab.id));
     if (storeExportButton) {
-      storeExportButton.disabled = !isAccount || !hasStoreData || $('taskRail')?.dataset.active === 'true';
+      storeExportButton.disabled = !isAccount || !hasStoreData || (jobIsActive(currentTaskJob) && currentTaskOwnsTab);
     }
     if (storeCommitButton) {
-      storeCommitButton.disabled = !isAccount || !hasPendingStore || currentStoreCommitted || $('taskRail')?.dataset.active === 'true';
+      storeCommitButton.disabled = !isAccount || !hasPendingStore || currentStoreCommitted || (jobIsActive(currentTaskJob) && currentTaskOwnsTab);
       storeCommitButton.textContent = currentStoreCommitted ? '已加入数据中心店铺表' : '加到数据中心店铺表';
     }
 
     if (!isAccount) {
       $('storeCurrentState').textContent = '请进入店铺页';
-      if (collectButton) collectButton.textContent = '采集当前店铺页';
+      if (collectButton) collectButton.textContent = '采集当前店铺评价';
       if (hint) hint.textContent = '请先打开闲鱼卖家账号页；采集完成后会在这里直接显示结果和下载入口。';
       return;
     }
@@ -491,17 +553,17 @@
     if (hasPendingStore) {
       const pendingReviewCount = Number(pendingCurrentStoreProfile?.reviewCountLoaded || pendingCurrentStoreProfile?.reviews?.length || 0);
       $('storeCurrentState').textContent = `${currentStoreCommitted ? '已加入数据中心' : '本次已采集'} · ${pendingReviewCount} 条评价`;
-      if (collectButton) collectButton.textContent = '重新采集当前店铺页';
+      if (collectButton) collectButton.textContent = '重新采集当前店铺评价';
       if (hint) {
         hint.textContent = `本次已读取 ${pendingReviewCount} 条评价，结果已暂存；可以直接下载店铺 Excel，也可以点击“加到数据中心店铺表”。`;
       }
-    } else if (currentStoreStatus.exists) {
+    } else if (hasStoreHistory) {
       $('storeCurrentState').textContent = `历史已采集 · ${reviewCount} 条评价`;
-      if (collectButton) collectButton.textContent = '重新采集当前店铺页';
+      if (collectButton) collectButton.textContent = '重新采集当前店铺评价';
       if (hint) hint.textContent = `已找到当前店铺的历史记录：${reviewCount} 条评价${collectedAt ? `，最近采集于 ${collectedAt}` : ''}。重新采集会先生成本次结果，确认后再加入店铺表。`;
     } else {
       $('storeCurrentState').textContent = '可采集 · 暂无历史记录';
-      if (collectButton) collectButton.textContent = '采集当前店铺页';
+      if (collectButton) collectButton.textContent = '采集当前店铺评价';
       if (hint) hint.textContent = '当前店铺还没有本地采集记录；点击采集后会在这里显示完成状态、评价数量和下载入口。';
     }
   }
@@ -560,7 +622,7 @@
     } catch (firstError) {
       try {
         await executeScript({ target: { tabId }, world: 'MAIN', files: ['main-world.js'] }).catch(() => {});
-        await executeScript({ target: { tabId }, world: 'ISOLATED', files: ['content.js'] });
+        await executeScript({ target: { tabId }, world: 'ISOLATED', files: ['image-utils.js', 'content.js'] });
         return await sendToTab(tabId, message, timeoutMs);
       } catch (secondError) {
         throw new Error(secondError?.message || firstError?.message || '无法连接当前闲鱼页面，请刷新页面后重试。');
@@ -593,13 +655,192 @@
     }
   }
 
+  function fieldCatalog() {
+    return window.XianyuFieldConfig || { fields: {}, defaults: {} };
+  }
+
+  function fieldDefinitions(type = fieldConfigType) {
+    return Array.isArray(fieldCatalog().fields?.[type]) ? fieldCatalog().fields[type] : [];
+  }
+
+  function defaultFieldIds(type) {
+    return [...(fieldCatalog().defaults?.[type] || fieldDefinitions(type).map(field => field.id))];
+  }
+
+  function normalizedFieldIds(type, value) {
+    const valid = new Set(fieldDefinitions(type).map(field => field.id));
+    const ids = Array.isArray(value) ? [...new Set(value.filter(id => valid.has(id)))] : [];
+    return ids.length ? ids : defaultFieldIds(type);
+  }
+
+  function fieldLabel(type, id) {
+    return fieldDefinitions(type).find(field => field.id === id)?.label || id;
+  }
+
+  function renderFieldSummaries() {
+    const types = [
+      ['product', 'productFieldSummary', 'productFieldTabCount'],
+      ['storeProfile', 'storeProfileFieldSummary', 'storeProfileFieldTabCount'],
+      ['storeReview', 'storeReviewFieldSummary', 'storeReviewFieldTabCount']
+    ];
+    for (const [type, summaryId, countId] of types) {
+      const ids = normalizedFieldIds(type, settings[`${type}Fields`]);
+      const summary = $(summaryId);
+      const count = $(countId);
+      if (summary) summary.textContent = `已选 ${ids.length} / ${fieldDefinitions(type).length} 个字段`;
+      if (count) count.textContent = ids.length;
+    }
+  }
+
+  function renderSettings() {
+    $('downloadAuto').checked = settings.downloadMode === 'auto';
+    $('downloadManual').checked = settings.downloadMode !== 'auto';
+    $('downloadFolder').value = settings.downloadFolder || '';
+    $('imageLimit').value = String(settings.imageLimit ?? 0);
+    $('maxEmbedImages').value = String(settings.maxEmbedImages ?? 1000);
+    $('collectSellerInfo').checked = settings.collectSellerInfo !== false;
+    $('saveAs').checked = Boolean(settings.saveAs);
+    $('notifyOnComplete').checked = settings.notifyOnComplete !== false;
+    renderFieldSummaries();
+    setMode(settings.mode || 'rpa', false);
+  }
+
+  function fieldConfigOpen(type = 'product') {
+    fieldConfigType = ['product', 'storeProfile', 'storeReview'].includes(type) ? type : 'product';
+    fieldConfigDraft = {
+      product: normalizedFieldIds('product', settings.productFields),
+      storeProfile: normalizedFieldIds('storeProfile', settings.storeProfileFields),
+      storeReview: normalizedFieldIds('storeReview', settings.storeReviewFields)
+    };
+    $('fieldConfigSearch').value = '';
+    $('fieldConfigModal').classList.remove('is-hidden');
+    renderFieldConfig();
+    $('fieldConfigSearch').focus();
+  }
+
+  function fieldMatches(field, query) {
+    const text = `${field.label} ${field.group || ''} ${field.id}`.toLowerCase();
+    return !query || text.includes(query.toLowerCase());
+  }
+
+  function renderFieldConfig() {
+    if (!fieldConfigDraft) return;
+    document.querySelectorAll('[data-field-tab]').forEach(button => {
+      const selected = button.dataset.fieldTab === fieldConfigType;
+      button.classList.toggle('is-selected', selected);
+      button.setAttribute('aria-selected', String(selected));
+    });
+    const definitions = fieldDefinitions(fieldConfigType);
+    const selectedIds = fieldConfigDraft[fieldConfigType];
+    const selectedSet = new Set(selectedIds);
+    const query = $('fieldConfigSearch').value.trim();
+    const available = definitions.filter(field => !selectedSet.has(field.id) && fieldMatches(field, query));
+    const selected = selectedIds
+      .map(id => definitions.find(field => field.id === id))
+      .filter(Boolean)
+      .filter(field => fieldMatches(field, query));
+    const availableList = $('availableFieldList');
+    const selectedList = $('selectedFieldList');
+    availableList.replaceChildren();
+    selectedList.replaceChildren();
+    for (const field of available) {
+      const row = document.createElement('div');
+      row.className = 'field-config-row available';
+      const copy = document.createElement('div');
+      copy.className = 'field-config-row-copy';
+      const label = document.createElement('strong');
+      label.textContent = field.label;
+      const group = document.createElement('small');
+      group.textContent = `${field.group || '字段'} · ${field.id}`;
+      copy.append(label, group);
+      const action = document.createElement('button');
+      action.className = 'field-row-action add';
+      action.type = 'button';
+      action.textContent = '添加';
+      action.addEventListener('click', () => {
+        fieldConfigDraft[fieldConfigType].push(field.id);
+        renderFieldConfig();
+      });
+      row.append(copy, action);
+      availableList.append(row);
+    }
+    for (const [index, field] of selected.entries()) {
+      const actualIndex = selectedIds.indexOf(field.id);
+      const row = document.createElement('div');
+      row.className = 'field-config-row selected';
+      const order = document.createElement('span');
+      order.className = 'field-row-order';
+      order.textContent = String(actualIndex + 1).padStart(2, '0');
+      const copy = document.createElement('div');
+      copy.className = 'field-config-row-copy';
+      const label = document.createElement('strong');
+      label.textContent = field.label;
+      const group = document.createElement('small');
+      group.textContent = `${field.group || '字段'} · ${field.id}`;
+      copy.append(label, group);
+      const actions = document.createElement('div');
+      actions.className = 'field-row-actions';
+      for (const [symbol, delta, title] of [['↑', -1, '上移'], ['↓', 1, '下移']]) {
+        const action = document.createElement('button');
+        action.className = 'field-row-action icon-action';
+        action.type = 'button';
+        action.title = title;
+        action.textContent = symbol;
+        action.disabled = (delta < 0 && actualIndex === 0) || (delta > 0 && actualIndex === selectedIds.length - 1);
+        action.addEventListener('click', () => {
+          const target = actualIndex + delta;
+          if (target < 0 || target >= selectedIds.length) return;
+          const [moved] = fieldConfigDraft[fieldConfigType].splice(actualIndex, 1);
+          fieldConfigDraft[fieldConfigType].splice(target, 0, moved);
+          renderFieldConfig();
+        });
+        actions.append(action);
+      }
+      const remove = document.createElement('button');
+      remove.className = 'field-row-action remove';
+      remove.type = 'button';
+      remove.title = '移除';
+      remove.textContent = '×';
+      remove.addEventListener('click', () => {
+        fieldConfigDraft[fieldConfigType].splice(actualIndex, 1);
+        if (!fieldConfigDraft[fieldConfigType].length) fieldConfigDraft[fieldConfigType] = defaultFieldIds(fieldConfigType).slice(0, 1);
+        renderFieldConfig();
+      });
+      actions.append(remove);
+      row.append(order, copy, actions);
+      selectedList.append(row);
+    }
+    $('availableFieldCount').textContent = String(available.length);
+    $('selectedFieldCount').textContent = String(fieldConfigDraft[fieldConfigType].length);
+    $('fieldConfigFooterCount').textContent = `已选 ${fieldConfigDraft[fieldConfigType].length} 个字段`;
+    $('fieldConfigTitle').textContent = `字段配置工作台 · ${fieldConfigType === 'product' ? '商品表' : fieldConfigType === 'storeProfile' ? '店铺资料表' : '店铺评价表'}`;
+  }
+
+  function closeFieldConfig() {
+    fieldConfigDraft = null;
+    $('fieldConfigModal').classList.add('is-hidden');
+  }
+
+  async function saveFieldConfig() {
+    if (!fieldConfigDraft) return;
+    const next = { ...settings, productFields: fieldConfigDraft.product, storeProfileFields: fieldConfigDraft.storeProfile, storeReviewFields: fieldConfigDraft.storeReview };
+    const response = await sendRuntime({ type: 'SAVE_SETTINGS', settings: next });
+    if (!response?.ok) throw new Error(response?.error || '保存字段设置失败');
+    settings = { ...settings, ...(response.settings || next) };
+    closeFieldConfig();
+    renderSettings();
+    setStatus('字段设置已保存；后续商品表、店铺资料表和店铺评价表都会使用新选择。', 'success');
+  }
+
   function setPageButtons(supported, pageType = currentPageType) {
     const active = Boolean($('taskRail').dataset.active === 'true');
-    $('collectButton').disabled = !supported || pageType !== 'detail' || active;
-    $('storeCollectButton').disabled = !supported || pageType !== 'account' || active;
-    $('diagnosticButton').disabled = !supported;
-    $('batchLinkButton').disabled = active;
-    $('searchCrawlButton').disabled = !supported || pageType !== 'search' || active;
+    const currentTaskOwnsTab = Boolean(currentTaskJob?.tabId && activeTab?.id && Number(currentTaskJob.tabId) === Number(activeTab.id));
+    const controlsBusy = active && currentTaskOwnsTab;
+    $('collectButton').disabled = !supported || pageType !== 'detail' || controlsBusy;
+    $('storeCollectButton').disabled = !supported || pageType !== 'account' || controlsBusy;
+    $('storeProductsButton') && ($('storeProductsButton').disabled = !supported || pageType !== 'account' || controlsBusy);
+    $('batchLinkButton').disabled = controlsBusy;
+    $('searchCrawlButton').disabled = !supported || pageType !== 'search' || controlsBusy;
   }
 
   function updateHomePageContext({ supported = false, pageType = '', title = '', url = '' } = {}) {
@@ -675,6 +916,10 @@
       $('storePageTitle').textContent = page?.title || activeTab.title || activeTab.url;
       $('storePageUrl').textContent = page?.url || activeTab.url;
       $('storePageType').textContent = page?.pageType === 'account' ? '店铺页' : page?.pageType === 'detail' ? '详情页' : '搜索页';
+      const itemStatus = page?.pageType === 'detail'
+        ? await sendRuntime({ type: 'GET_ITEM_STATUS', itemUrl: page.url || activeTab.url }).catch(() => ({ exists: false, item: null }))
+        : { exists: false, item: null };
+      renderDetailStatus(page?.pageType || '', itemStatus);
       const storeStatus = page?.pageType === 'account'
         ? await sendRuntime({ type: 'GET_STORE_STATUS', sellerUrl: page.url || activeTab.url }).catch(() => ({ exists: false, profile: null }))
         : { exists: false, profile: null };
@@ -715,17 +960,37 @@
     $('storeCount').textContent = response.storeCount || 0;
     storeDataReady = Number(response.storeCount || 0) > 0;
     const storeExportButton = $('storeExportButton');
+    const currentTaskOwnsTab = Boolean(currentTaskJob?.tabId && activeTab?.id && Number(currentTaskJob.tabId) === Number(activeTab.id));
     if (storeExportButton) {
-      storeExportButton.disabled = currentPageType !== 'account' || !hasCurrentStoreData() || $('taskRail')?.dataset.active === 'true';
+      storeExportButton.disabled = currentPageType !== 'account' || !hasCurrentStoreData() || (jobIsActive(currentTaskJob) && currentTaskOwnsTab);
     }
     const storeCommitButton = $('storeCommitButton');
     if (storeCommitButton) storeCommitButton.disabled = currentPageType !== 'account' || !pendingCurrentStoreProfile || currentStoreCommitted;
+    const storeProductsButton = $('storeProductsButton');
+    if (storeProductsButton) storeProductsButton.disabled = currentPageType !== 'account' || (jobIsActive(currentTaskJob) && currentTaskOwnsTab);
     const storeDataExportButton = $('storeDataExportButton');
     if (storeDataExportButton) storeDataExportButton.disabled = !storeDataReady;
   }
 
   function jobIsActive(job) {
-    return Boolean(job && !['completed', 'partial', 'stopped', 'failed'].includes(job.status));
+    return Boolean(job && !['completed', 'partial', 'stopped', 'failed', 'paused'].includes(job.status));
+  }
+
+  function jobStatusText(job) {
+    if (!job) return '未开始';
+    if (job.status === 'paused') return '已暂停';
+    if (job.status === 'completed') return '已完成';
+    if (job.status === 'partial') return '部分完成';
+    if (job.status === 'stopped') return '已停止';
+    if (job.status === 'failed') return '失败';
+    return '正在处理';
+  }
+
+  function jobTypeText(job) {
+    if (job?.type === 'links') return `批量商品 · ${job.links?.length || 0} 条`;
+    if (job?.type === 'search') return `搜索跨页 · ${job.targetCount || 0} 条`;
+    if (job?.type === 'store-products') return `店铺全部商品 · ${job.targetCount || job.links?.length || '全部'}`;
+    return '采集任务';
   }
 
   function jobProgress(job) {
@@ -734,17 +999,23 @@
       const total = Math.max(1, job.links?.length || 0);
       return Math.min(100, Math.round((Number(job.index || 0) / total) * 100));
     }
-    const total = Math.max(1, Number(job.targetCount || 0));
+    const total = Math.max(1, Number(job.targetCount || job.links?.length || 0));
     return Math.min(100, Math.round((Number(job.visited || 0) / total) * 100));
   }
 
   function jobFailureRecords(job) {
-    if (Array.isArray(job?.failureRecords)) return job.failureRecords;
-    return [
+    const records = Array.isArray(job?.failureRecords) ? job.failureRecords : [
       ...(Array.isArray(job?.failures) ? job.failures.map(entry => ({ ...entry, stage: entry.stage || 'detail-page' })) : []),
       ...(Array.isArray(job?.sellerFailures) ? job.sellerFailures.map(entry => ({ ...entry, stage: entry.stage || 'seller-profile', url: entry.url || entry.itemUrl || '' })) : []),
       ...(Array.isArray(job?.qualityWarnings) ? job.qualityWarnings.map(entry => ({ ...entry, stage: entry.stage || 'field-quality', url: entry.url || entry.itemUrl || '' })) : [])
     ];
+    return records.map(record => {
+      const rawUrl = record.url || record.itemUrl || record.sellerUrl || '';
+      const url = rawUrl && typeof rawUrl === 'object'
+        ? (rawUrl.itemUrl || rawUrl.url || '')
+        : rawUrl;
+      return { ...record, url: String(url || '') };
+    });
   }
 
   function renderTaskFailures(job) {
@@ -762,7 +1033,8 @@
       const stage = document.createElement('strong');
       stage.textContent = record.stage === 'seller-profile'
         ? '店铺资料补充失败'
-        : record.stage === 'field-quality' ? '字段待补充' : '商品详情采集失败';
+        : record.stage === 'store-discovery' ? '店铺商品发现不完整'
+          : record.stage === 'field-quality' ? '字段待补充' : '商品详情采集失败';
       const target = document.createElement('span');
       target.textContent = record.url || record.sellerUrl || record.itemId || '未提供链接';
       target.title = target.textContent;
@@ -798,6 +1070,10 @@
       $('homeTaskHint').textContent = '查看当前任务进度和完成结果';
       $('stopJobButton').disabled = true;
       $('stopJobButton').textContent = '停止任务';
+      if ($('taskPauseButton')) {
+        $('taskPauseButton').disabled = true;
+        $('taskPauseButton').textContent = '暂停任务';
+      }
       $('taskExportButton').disabled = true;
       if ($('taskCommitButton')) {
         $('taskCommitButton').disabled = true;
@@ -805,20 +1081,26 @@
       }
       if ($('storeExportButton')) $('storeExportButton').disabled = currentPageType !== 'account' || !hasCurrentStoreData();
       if ($('storeCommitButton')) $('storeCommitButton').disabled = currentPageType !== 'account' || !pendingCurrentStoreProfile || currentStoreCommitted;
+      if ($('storeProductsButton')) $('storeProductsButton').disabled = currentPageType !== 'account';
       setPageButtons(Boolean(activeTab && isGoofishUrl(activeTab.url || '')));
       return;
     }
 
-    const typeText = job.type === 'links' ? '链接批量' : '搜索跨页';
-    const stateText = active ? '正在处理' : job.status === 'completed' ? '处理完成' : job.status === 'partial' ? '部分完成' : job.status === 'stopped' ? '已停止' : '处理失败';
+    const typeText = job.type === 'links' ? '链接批量' : job.type === 'store-products' ? '店铺全部商品' : '搜索跨页';
+    const stateText = jobStatusText(job);
     const percent = jobProgress(job);
     $('jobBadge').textContent = `${typeText} · ${job.mode === 'api' ? 'API 模式' : '详情模式'}`;
     $('jobHeadline').textContent = stateText;
     $('jobProgressText').textContent = `${percent}%`;
     $('progressRing').style.setProperty('--progress', `${percent}%`);
     $('progressRing').style.setProperty('--ring-color', job.status === 'completed' ? 'var(--green)' : job.status === 'partial' ? '#d39b32' : job.status === 'failed' ? 'var(--danger)' : 'var(--blue)');
-    $('stopJobButton').disabled = !active;
-    $('stopJobButton').textContent = active ? '停止任务' : '任务已结束';
+    $('stopJobButton').disabled = !active && job.status !== 'paused';
+    $('stopJobButton').textContent = active || job.status === 'paused' ? '停止任务' : '任务已结束';
+    const pauseButton = $('taskPauseButton');
+    if (pauseButton) {
+      pauseButton.disabled = !active && job.status !== 'paused';
+      pauseButton.textContent = job.status === 'paused' ? '继续任务' : '暂停任务';
+    }
     const stagedCount = Array.isArray(job.stagedItems) ? job.stagedItems.length : Number(job.collected || 0);
     const hasStagedItems = stagedCount > 0;
     $('taskExportButton').disabled = active || !hasStagedItems;
@@ -828,19 +1110,24 @@
         ? '已加入数据中心商品表'
         : '加到数据中心商品表';
     }
-    if ($('storeExportButton')) $('storeExportButton').disabled = active || currentPageType !== 'account' || !hasCurrentStoreData();
-    if ($('storeCommitButton')) $('storeCommitButton').disabled = active || currentPageType !== 'account' || !pendingCurrentStoreProfile || currentStoreCommitted;
+    const currentTaskOwnsTab = Boolean(job.tabId && activeTab?.id && Number(job.tabId) === Number(activeTab.id));
+    const controlsBusy = active && currentTaskOwnsTab;
+    if ($('storeExportButton')) $('storeExportButton').disabled = controlsBusy || currentPageType !== 'account' || !hasCurrentStoreData();
+    if ($('storeCommitButton')) $('storeCommitButton').disabled = controlsBusy || currentPageType !== 'account' || !pendingCurrentStoreProfile || currentStoreCommitted;
+    if ($('storeProductsButton')) $('storeProductsButton').disabled = controlsBusy || currentPageType !== 'account';
 
     const progress = job.type === 'links'
       ? `详情链接 ${Math.min(Number(job.index || 0), job.links?.length || 0)}/${job.links?.length || 0}，成功 ${job.collected || 0} 条`
-      : `详情页 ${job.visited || 0}/${job.targetCount || 0}，成功 ${job.collected || 0} 条，搜索页 ${job.pagesProcessed || 0}/${job.maxPages || 0}`;
+      : job.type === 'store-products'
+        ? `店铺商品详情 ${job.visited || 0}/${job.targetCount || job.links?.length || '全部'}，成功 ${job.collected || 0} 条`
+        : `详情页 ${job.visited || 0}/${job.targetCount || 0}，成功 ${job.collected || 0} 条，搜索页 ${job.pagesProcessed || 0}/${job.maxPages || 0}`;
     const failures = job.failures?.length ? `，失败 ${job.failures.length} 个` : '';
     const sellerFailures = job.sellerFailures?.length ? `，店铺资料失败 ${job.sellerFailures.length} 个` : '';
     const qualityWarnings = job.qualityWarnings?.length ? `，字段待补充 ${job.qualityWarnings.length} 个` : '';
     $('jobStatus').textContent = `${job.message || '任务处理中'}（${progress}${failures}${sellerFailures}${qualityWarnings}）`;
     $('taskCountText').textContent = progress;
     $('taskModeText').textContent = job.mode === 'api' ? 'API 模式' : '页面详情模式';
-    $('taskTypeText').textContent = job.type === 'links' ? `商品详情 · ${job.links?.length || 0} 个` : `搜索详情 · ${job.targetCount || 0} 条`;
+    $('taskTypeText').textContent = jobTypeText(job);
     $('taskCreatedText').textContent = formatDate(job.createdAt);
     $('taskStateText').textContent = stateText;
     renderTaskFailures(job);
@@ -848,11 +1135,11 @@
     $('homeTaskHint').textContent = `${stateText} · ${job.collected || 0} 条成功记录`;
     $('currentState').textContent = active ? '任务运行中' : stateText;
     setPageButtons(Boolean(activeTab && isGoofishUrl(activeTab.url || '')));
-    $('collectButton').disabled = active;
+    $('collectButton').disabled = controlsBusy;
 
     const isNewJob = job.id && job.id !== lastJobId;
     lastJobId = job.id || '';
-    if (active && currentScreen !== 'task' && isNewJob) showScreen('task');
+    if (active && currentScreen === 'home' && isNewJob) showScreen('task', true, 'tasks');
 
     const terminalKey = `${job.id}:${job.status}:${job.updatedAt}:${job.autoExportStatus || ''}:${job.committedToDataCenter ? 'committed' : ''}`;
     if (!active && terminalKey !== lastTerminalKey) {
@@ -865,9 +1152,114 @@
   }
 
   async function refreshJob() {
-    const response = await sendRuntime({ type: 'GET_JOB_STATUS' });
+    const response = await sendRuntime({ type: 'GET_JOB_STATUS', jobId: selectedTaskId || undefined });
     if (!response?.ok) throw new Error(response?.error || '读取任务状态失败');
     renderJob(response.job);
+  }
+
+  function renderTaskCenter() {
+    const list = $('tasksList');
+    const count = $('taskCenterCount');
+    if (!list || !count) return;
+    count.textContent = String(taskJobs.length);
+    list.replaceChildren();
+    if (!taskJobs.length) {
+      const empty = document.createElement('p');
+      empty.className = 'empty-state';
+      empty.textContent = '还没有任务记录。开始一次商品或店铺采集后，任务会一直保留在这里。';
+      list.append(empty);
+      return;
+    }
+
+    for (const job of taskJobs) {
+      const card = document.createElement('article');
+      card.className = `task-center-card status-${job.status || 'unknown'}`;
+      const head = document.createElement('div');
+      head.className = 'task-center-card-head';
+      const title = document.createElement('div');
+      title.className = 'task-center-card-title';
+      const kicker = document.createElement('span');
+      kicker.className = 'task-label';
+      kicker.textContent = job.mode === 'api' ? 'API MODE' : 'DETAIL MODE';
+      const name = document.createElement('strong');
+      name.textContent = jobTypeText(job);
+      title.append(kicker, name);
+      const badge = document.createElement('span');
+      badge.className = 'task-status-badge';
+      badge.textContent = jobStatusText(job);
+      head.append(title, badge);
+
+      const progress = document.createElement('div');
+      progress.className = 'task-center-progress';
+      const progressBar = document.createElement('span');
+      progressBar.style.width = `${jobProgress(job)}%`;
+      progress.append(progressBar);
+      const summary = document.createElement('p');
+      summary.className = 'task-center-summary';
+      summary.textContent = job.type === 'links'
+        ? `详情页 ${Math.min(Number(job.index || 0), job.links?.length || 0)}/${job.links?.length || 0} · 成功 ${job.collected || 0} 条`
+        : job.type === 'store-products'
+          ? `店铺商品详情 ${job.visited || 0}/${job.targetCount || job.links?.length || '全部'} · 成功 ${job.collected || 0} 条`
+        : `详情页 ${job.visited || 0}/${job.targetCount || job.links?.length || '全部'} · 成功 ${job.collected || 0} 条`;
+      const meta = document.createElement('small');
+      meta.textContent = `${formatDate(job.updatedAt || job.createdAt)} · ${job.message || ''}`;
+
+      const actions = document.createElement('div');
+      actions.className = 'task-center-actions';
+      const view = document.createElement('button');
+      view.className = 'button small outline-action';
+      view.type = 'button';
+      view.textContent = '查看详情';
+      view.addEventListener('click', () => {
+        selectedTaskId = job.id;
+        showScreen('task', true, 'tasks');
+        void refreshJob().catch(error => setStatus(error.message, 'error'));
+      });
+      actions.append(view);
+      if (jobIsActive(job) || job.status === 'paused') {
+        const toggle = document.createElement('button');
+        toggle.className = 'button small outline-action';
+        toggle.type = 'button';
+        toggle.textContent = job.status === 'paused' ? '继续' : '暂停';
+        toggle.addEventListener('click', () => toggleTask(job).catch(error => setStatus(error.message, 'error')));
+        actions.append(toggle);
+      }
+      if (!jobIsActive(job) && (job.stagedItems?.length || job.collected)) {
+        const exportButton = document.createElement('button');
+        exportButton.className = 'button small primary';
+        exportButton.type = 'button';
+        exportButton.textContent = '导出';
+        exportButton.addEventListener('click', () => {
+          selectedTaskId = job.id;
+          void refreshJob()
+            .then(() => exportTaskResult())
+            .catch(error => setStatus(error.message, 'error'));
+        });
+        actions.append(exportButton);
+      }
+      card.append(head, progress, summary, meta, actions);
+      list.append(card);
+    }
+  }
+
+  async function refreshTasks() {
+    const response = await sendRuntime({ type: 'GET_JOBS' });
+    if (!response?.ok) throw new Error(response?.error || '读取任务中心失败');
+    taskJobs = Array.isArray(response.jobs) ? response.jobs : [];
+    if (selectedTaskId && !taskJobs.some(job => job.id === selectedTaskId)) selectedTaskId = '';
+    renderTaskCenter();
+    if (!selectedTaskId && currentTaskJob?.id && taskJobs.some(job => job.id === currentTaskJob.id)) {
+      selectedTaskId = currentTaskJob.id;
+    }
+  }
+
+  async function toggleTask(job) {
+    const type = job.status === 'paused' ? 'RESUME_JOB' : 'PAUSE_JOB';
+    const response = await sendRuntime({ type, jobId: job.id });
+    if (!response?.ok) throw new Error(response?.error || '更新任务状态失败');
+    selectedTaskId = job.id;
+    await Promise.all([refreshTasks(), refreshJob()]);
+    setStatus(response.job?.status === 'paused' ? '任务已暂停；可以继续使用其他采集功能。' : '任务已继续。', 'success');
   }
 
   async function collectCurrentPage() {
@@ -917,10 +1309,11 @@
               if (enrichment.enriched) enrichedCount += 1;
             }
           } catch (_) {
-            // 商品详情结果仍然保留；店铺补充失败时提示用户用“当前店铺页”完整采集。
+            // 商品详情结果仍然保留；店铺补充失败时提示用户用“当前店铺评价”完整采集。
           }
         }
         renderCurrentResultActions();
+        setCollectionSuccess('detail', true, `当前详情页已完成 ${count} 条商品结果${enrichedCount ? `，并补充了 ${enrichedCount} 个店铺基础资料` : ''}。下面可以加入商品表或单独导出。`);
         $('currentCollectHint').textContent = `当前详情页采集完成：${count} 条商品结果已暂存${enrichedCount ? `，已补充 ${enrichedCount} 个店铺基础资料` : ''}。请选择“加到数据中心商品表”或“导出当前详情页”；完整店铺评价请单独进入店铺页采集。`;
         setStatus(`当前详情页采集完成：${count} 条结果已暂存${enrichedCount ? `，店铺资料已补充 ${enrichedCount} 个` : ''}，等待你选择加入总表或单独导出。`, 'success');
       }
@@ -997,11 +1390,12 @@
   async function collectCurrentStorePage() {
     if (!activeTab?.id) return;
     const button = $('storeCollectButton');
-    const hadHistory = Boolean(currentStoreStatus?.exists);
+    const hadHistory = Boolean(currentStoreStatus?.exists || currentStoreStatus?.historyExists);
+    clearCurrentStoreResult();
     button.disabled = true;
     button.textContent = '正在加载全部公开评价…';
     $('storeCollectHint').textContent = '正在读取店铺资料并滚动评价区域，请保持当前店铺页打开。';
-    setStatus('正在采集当前店铺页的公开资料、评价和评价图片…');
+    setStatus('正在采集当前店铺评价、店铺资料和评价图片…');
 
     try {
       const page = await sendToTabWithRecovery(activeTab.id, { type: 'GET_PAGE_INFO' });
@@ -1018,16 +1412,53 @@
       currentStoreCommitted = false;
       const reviewCount = Number(result.reviewCount || result.reviewCountLoaded || result.reviews?.length || 0);
       renderStoreStatus('account', currentStoreStatus);
-      setStatus(`${hadHistory ? '当前店铺页重新采集完成' : '当前店铺页首次采集完成'}：本次暂存 1 份店铺资料，读取 ${reviewCount} 条公开评价；现在可以直接下载或加入店铺表。`, 'success');
+      setCollectionSuccess('store', true, `${hadHistory ? '已完成一次历史更新' : '已完成首次采集'}：读取 ${reviewCount} 条公开评价，评价图片会随店铺评价表一起导出。`);
+      setStatus(`${hadHistory ? '当前店铺评价重新采集完成' : '当前店铺评价首次采集完成'}：本次暂存 1 份店铺资料，读取 ${reviewCount} 条公开评价；现在可以直接下载或加入店铺表。`, 'success');
       $('storeCollectHint').textContent = `本次已读取 ${reviewCount} 条评价，结果已暂存。下载文件包含“店铺资料”和“店铺评价综合”两张表，评价图片会嵌入对应评价行；可以直接下载，也可以加入数据中心店铺表。`;
     } catch (error) {
       setStatus(error.message || '店铺页采集失败，请刷新账号页后重试。', 'error');
       $('storeCollectHint').textContent = '如果评价区仍在加载，请停留几秒后重试。';
     } finally {
       button.disabled = false;
-      button.textContent = '采集当前店铺页';
+      button.textContent = pendingCurrentStoreProfile ? '重新采集当前店铺评价' : '采集当前店铺评价';
       await refreshCurrentPage().catch(() => {});
       renderStoreStatus(currentPageType, currentStoreStatus);
+    }
+  }
+
+  async function startStoreProducts() {
+    if (!activeTab?.id || currentPageType !== 'account') {
+      setStatus('请先打开闲鱼店铺/账号页，再启动店铺全部商品采集。', 'error');
+      return;
+    }
+    const button = $('storeProductsButton');
+    if (button) {
+      button.disabled = true;
+      button.textContent = '正在启动店铺商品任务…';
+    }
+    try {
+      const response = await sendRuntime({
+        type: 'START_STORE_PRODUCTS',
+        storeUrl: activeTab.url,
+        storeName: pendingCurrentStoreProfile?.sellerName
+          || currentStoreStatus?.profile?.sellerName
+          || '',
+        mode: selectedMode,
+        delayMs: 2200
+      });
+      if (!response?.ok) throw new Error(response?.error || '启动店铺全部商品采集失败');
+      selectedTaskId = response.job?.id || '';
+      setStatus('店铺全部商品采集任务已启动；会在独立标签页读取商品并逐个进入详情。', 'success');
+      await refreshTasks();
+      showScreen('task', true, 'tasks');
+      await refreshJob();
+    } catch (error) {
+      setStatus(error.message || '启动店铺全部商品采集失败。', 'error');
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = '采集店铺全部商品详情';
+      }
     }
   }
 
@@ -1055,112 +1486,6 @@
     }
   }
 
-  function diagnosticJson(value) {
-    return JSON.stringify(value ?? null, null, 2);
-  }
-
-  function diagnosticFilePart(value, fallback = '页面') {
-    const cleaned = String(value || fallback)
-      .replace(/[\\/:*?"<>|]+/g, '_')
-      .replace(/\s+/g, '_')
-      .replace(/_+/g, '_')
-      .replace(/^[_\.\-]+|[_\.\-]+$/g, '')
-      .slice(0, 80);
-    return cleaned || fallback;
-  }
-
-  function dataUrlToBytes(dataUrl) {
-    const base64 = String(dataUrl || '').split(',')[1] || '';
-    if (!base64 || typeof atob !== 'function') return new Uint8Array();
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-    return bytes;
-  }
-
-  function downloadBlob(blob, filename, saveAs = true) {
-    const url = URL.createObjectURL(blob);
-    return new Promise((resolve, reject) => {
-      chrome.downloads.download({ url, filename, saveAs }, id => {
-        const error = chrome.runtime.lastError;
-        if (error) reject(new Error(error.message));
-        else resolve(id);
-      });
-    }).finally(() => {
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    });
-  }
-
-  async function exportDiagnosticPackage() {
-    if (!activeTab?.id || !isGoofishUrl(activeTab.url || '')) {
-      setStatus('请先打开闲鱼详情页或搜索页，再导出诊断包。', 'error');
-      return;
-    }
-
-    const button = $('diagnosticButton');
-    button.disabled = true;
-    button.textContent = '正在提取当前页面…';
-    setStatus('正在自动提取实时 DOM、图片、链接和公开接口响应…');
-
-    try {
-      const snapshot = await sendToTabWithRecovery(activeTab.id, { type: 'GET_PAGE_SNAPSHOT' });
-      if (!snapshot?.ok) throw new Error(snapshot?.error || '页面样本提取失败');
-
-      let screenshot = '';
-      try {
-        screenshot = await chrome.tabs.captureVisibleTab(activeTab.windowId, { format: 'png' });
-      } catch (_) {
-        // 某些浏览器/窗口不允许扩展截取当前页，诊断包仍然可以正常生成。
-      }
-
-      const capturedAt = snapshot.capturedAt || new Date().toISOString();
-      const files = [
-        {
-          name: 'README.txt',
-          data: [
-            '这是由闲鱼公开商品研究采集器自动生成的页面诊断包。',
-            '包含当前动态 DOM、可见文字、链接、图片地址、当前字段解析快照和经过字段脱敏的公开接口响应。',
-            '请在上传前快速检查是否包含你不希望分享的昵称、地址或其它个人信息。',
-            `生成时间：${capturedAt}`
-          ].join('\n')
-        },
-        {
-          name: 'page-info.json',
-          data: diagnosticJson({
-            ...snapshot.page,
-            capturedAt,
-            normalizedItemCount: snapshot.normalizedItems?.length || 0,
-            networkResponseCount: snapshot.networkResponseCount || 0
-          })
-        },
-        { name: 'live-dom.html', data: snapshot.html || '' },
-        { name: 'visible-text.txt', data: snapshot.visibleText || '' },
-        { name: 'links.json', data: diagnosticJson(snapshot.links || []) },
-        { name: 'image-urls.json', data: diagnosticJson(snapshot.images || []) },
-        { name: 'normalized-items.json', data: diagnosticJson(snapshot.normalizedItems || []) },
-        { name: 'account-profile.json', data: diagnosticJson(snapshot.accountProfile || {}) },
-        { name: 'network-responses.json', data: diagnosticJson(snapshot.networkResponses || []) }
-      ];
-      if (screenshot) files.push({ name: 'screenshot.png', data: dataUrlToBytes(screenshot) });
-
-      const blob = window.XianyuDiagnostic.createZip(files);
-      const date = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const pageKind = snapshot.page?.pageType === 'detail'
-        ? '详情页'
-        : snapshot.page?.pageType === 'account' ? '账号页' : '搜索页';
-      const filename = `闲鱼研究采集/页面诊断-${diagnosticFilePart(pageKind)}-${date}.zip`;
-      await downloadBlob(blob, filename, true);
-
-      const suffix = snapshot.page?.htmlTruncated ? '（DOM 较大，已按上限截取）' : '';
-      setStatus(`页面诊断包已下载${suffix}，请直接把 ZIP 上传给我。`, 'success');
-    } catch (error) {
-      setStatus(error.message || '诊断包生成失败，请刷新闲鱼页面后重试。', 'error');
-    } finally {
-      button.disabled = false;
-      button.textContent = '一键导出页面诊断包';
-    }
-  }
-
   function parseProductLinks(value) {
     return [...new Set(String(value || '')
       .split(/[\s,]+/)
@@ -1181,7 +1506,8 @@
       if (!response?.ok) throw new Error(response?.error || '启动链接批量采集失败');
       $('linkInput').value = '';
       setStatus(`已启动 ${links.length} 个链接的自动详情采集。`, 'success');
-      showScreen('task');
+      selectedTaskId = response.job?.id || '';
+      showScreen('task', true, 'tasks');
       await refreshJob();
     } catch (error) {
       setStatus(error.message || '启动批量采集失败。', 'error');
@@ -1211,7 +1537,8 @@
       });
       if (!response?.ok) throw new Error(response?.error || '启动搜索跨页采集失败');
       setStatus(`已启动自动跨页采集：目标 ${targetCount} 条，最多 ${maxPages} 页。`, 'success');
-      showScreen('task');
+      selectedTaskId = response.job?.id || '';
+      showScreen('task', true, 'tasks');
       await refreshJob();
     } catch (error) {
       setStatus(error.message || '启动跨页采集失败。', 'error');
@@ -1227,10 +1554,10 @@
     }
     setStatus('正在停止采集并关闭专用标签页…');
     try {
-      const response = await sendRuntime({ type: 'STOP_JOB' });
+      const response = await sendRuntime({ type: 'STOP_JOB', jobId: currentTaskJob?.id || selectedTaskId || undefined });
       if (!response?.ok) throw new Error(response?.error || '停止任务失败');
       setStatus('任务已停止，采集专用标签页已关闭；已经采集的数据仍保留在本机。', 'success');
-      await refreshJob();
+      await Promise.all([refreshJob(), refreshTasks()]);
     } catch (error) {
       setStatus(error.message || '停止任务失败。', 'error');
       await refreshJob().catch(() => {});
@@ -1277,6 +1604,9 @@
         taskType: isStoreExport ? 'store' : 'data',
         sellerUrl: isCurrentStoreExport
           ? (pendingCurrentStoreProfile?.sellerUrl || pendingCurrentStoreSourceUrl || activeTab?.url || '')
+          : undefined,
+        storeName: isCurrentStoreExport
+          ? (pendingCurrentStoreProfile?.sellerName || currentStoreStatus?.profile?.sellerName || '')
           : undefined,
         storeProfiles: isCurrentStoreExport && pendingCurrentStoreProfile
           ? [pendingCurrentStoreProfile]
@@ -1361,6 +1691,34 @@
     setStatus('当前数据已清空，历史任务仍然保留。', 'success');
   }
 
+  async function clearTasks() {
+    if (!taskJobs.length) {
+      setStatus('任务中心目前没有可清空的任务。', 'warning');
+      return;
+    }
+    if (!confirm('确定清空全部任务吗？正在运行或暂停的任务会被停止并关闭采集标签页；历史记录和数据中心不会删除。')) return;
+    const button = $('clearTasksButton');
+    if (button) {
+      button.disabled = true;
+      button.textContent = '正在清空…';
+    }
+    try {
+      const response = await sendRuntime({ type: 'CLEAR_JOBS' });
+      if (!response?.ok) throw new Error(response?.error || '清空任务失败');
+      selectedTaskId = '';
+      currentTaskJob = null;
+      await refreshTasks();
+      setStatus(`已清空 ${response.cleared || 0} 个任务；历史记录和数据中心未受影响。`, 'success');
+    } catch (error) {
+      setStatus(error.message || '清空任务失败。', 'error');
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = '清空全部任务';
+      }
+    }
+  }
+
   function formatDate(value) {
     const time = Date.parse(value || '');
     if (!time) return '时间未知';
@@ -1368,7 +1726,11 @@
   }
 
   function historyType(entry) {
-    return entry.type === 'links' ? '链接批量' : '搜索跨页';
+    if (entry.type === 'links') return '链接批量';
+    if (entry.type === 'store-products') return '店铺全部商品';
+    if (entry.type === 'store') return '店铺资料与评价';
+    if (entry.type === 'detail') return '当前详情';
+    return '搜索跨页';
   }
 
   async function refreshHistory() {
@@ -1376,7 +1738,9 @@
     if (!response?.ok) throw new Error(response?.error || '读取历史失败');
     const list = $('historyList');
     list.replaceChildren();
-    const history = Array.isArray(response.history) ? response.history.slice(0, 8) : [];
+    const history = Array.isArray(response.history) ? response.history : [];
+    const historyCount = $('historyCountText');
+    if (historyCount) historyCount.textContent = `${history.length} 条历史记录`;
     if (!history.length) {
       const empty = document.createElement('p');
       empty.className = 'empty-state';
@@ -1439,17 +1803,33 @@
     setStatus('历史任务已删除。', 'success');
   }
 
-  function renderSettings() {
-    $('downloadAuto').checked = settings.downloadMode === 'auto';
-    $('downloadManual').checked = settings.downloadMode !== 'auto';
-    $('downloadFolder').value = settings.downloadFolder || '';
-    $('fileNameTemplate').value = settings.fileNameTemplate || '';
-    $('imageLimit').value = String(settings.imageLimit ?? 0);
-    $('maxEmbedImages').value = String(settings.maxEmbedImages ?? 1000);
-    $('collectSellerInfo').checked = settings.collectSellerInfo !== false;
-    $('saveAs').checked = Boolean(settings.saveAs);
-    $('notifyOnComplete').checked = settings.notifyOnComplete !== false;
-    setMode(settings.mode || 'rpa', false);
+  async function clearHistory() {
+    const response = await sendRuntime({ type: 'GET_HISTORY' });
+    if (!response?.ok) throw new Error(response?.error || '读取历史失败');
+    const history = Array.isArray(response?.history) ? response.history : [];
+    if (!history.length) {
+      setStatus('目前没有可清空的历史记录。', 'warning');
+      return;
+    }
+    if (!confirm('确定清空全部采集历史吗？这不会删除数据中心商品表、店铺表，也不会影响正在运行的任务。')) return;
+    const button = $('clearHistoryButton');
+    if (button) {
+      button.disabled = true;
+      button.textContent = '正在清空…';
+    }
+    try {
+      const cleared = await sendRuntime({ type: 'CLEAR_HISTORY' });
+      if (!cleared?.ok) throw new Error(cleared?.error || '清空历史失败');
+      await refreshHistory();
+      setStatus(`已清空 ${history.length} 条历史记录；数据中心和任务未受影响。`, 'success');
+    } catch (error) {
+      setStatus(error.message || '清空历史失败。', 'error');
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = '清空全部历史';
+      }
+    }
   }
 
   async function loadSettings() {
@@ -1465,7 +1845,6 @@
       mode: selectedMode,
       downloadMode: $('downloadAuto').checked ? 'auto' : 'manual',
       downloadFolder: $('downloadFolder').value,
-      fileNameTemplate: $('fileNameTemplate').value,
       imageLimit: Number($('imageLimit').value || 0),
       maxEmbedImages: Number($('maxEmbedImages').value || 1000),
       collectSellerInfo: $('collectSellerInfo').checked,
@@ -1490,23 +1869,24 @@
         if (button.dataset.openScreen === 'monitor') void refreshMonitors().catch(error => setStatus(error.message, 'error'));
       });
     });
-    document.querySelector('[data-action="diagnostic"]')?.addEventListener('click', () => {
-      showScreen('detail');
-      void exportDiagnosticPackage();
-    });
     $('modeRpa').addEventListener('click', () => setMode('rpa'));
     $('modeApi').addEventListener('click', () => setMode('api'));
     $('collectButton').addEventListener('click', () => collectCurrentPage());
     $('currentCommitButton').addEventListener('click', () => commitCurrentItems());
     $('currentExportButton').addEventListener('click', () => exportCurrentItems());
     $('storeCollectButton').addEventListener('click', () => collectCurrentStorePage());
+    $('storeProductsButton')?.addEventListener('click', () => startStoreProducts());
     $('storeCommitButton').addEventListener('click', () => commitCurrentStore());
     $('storeExportButton').addEventListener('click', () => exportItems($('storeExportButton')).catch(error => setStatus(error.message, 'error')));
     $('storeDataButton').addEventListener('click', () => { setDataTab('stores'); showScreen('data'); });
-    $('diagnosticButton').addEventListener('click', () => exportDiagnosticPackage());
     $('batchLinkButton').addEventListener('click', () => startLinkBatch());
     $('searchCrawlButton').addEventListener('click', () => startSearchCrawl());
     $('stopJobButton').addEventListener('click', () => stopJob());
+    $('taskPauseButton')?.addEventListener('click', () => {
+      if (currentTaskJob) toggleTask(currentTaskJob).catch(error => setStatus(error.message, 'error'));
+    });
+    $('refreshTasksButton')?.addEventListener('click', () => refreshTasks().catch(error => setStatus(error.message, 'error')));
+    $('clearTasksButton')?.addEventListener('click', () => clearTasks().catch(error => setStatus(error.message, 'error')));
     $('copyFailedLinksButton')?.addEventListener('click', () => copyFailedLinks().catch(error => setStatus(error.message, 'error')));
     $('exportButton').addEventListener('click', () => exportItems($('exportButton')).catch(error => setStatus(error.message, 'error')));
     $('storeDataExportButton').addEventListener('click', () => exportItems($('storeDataExportButton')).catch(error => setStatus(error.message, 'error')));
@@ -1514,6 +1894,7 @@
     $('taskCommitButton').addEventListener('click', () => commitTaskResult().catch(error => setStatus(error.message, 'error')));
     $('taskDataButton').addEventListener('click', () => { setDataTab('products'); showScreen('data'); });
     $('clearButton').addEventListener('click', () => clearItems().catch(error => setStatus(error.message, 'error')));
+    $('clearHistoryButton')?.addEventListener('click', () => clearHistory().catch(error => setStatus(error.message, 'error')));
     $('dataProductsTab').addEventListener('click', () => setDataTab('products'));
     $('dataStoresTab').addEventListener('click', () => setDataTab('stores'));
     document.querySelectorAll('[data-open-data-tab]').forEach(button => {
@@ -1529,6 +1910,27 @@
       $('monitorLinkCount').textContent = `${count} 个有效链接`;
     });
     $('saveSettingsButton').addEventListener('click', () => saveSettings().catch(error => setStatus(error.message, 'error')));
+    document.querySelectorAll('[data-open-fields]').forEach(button => {
+      button.addEventListener('click', () => fieldConfigOpen(button.dataset.openFields));
+    });
+    document.querySelectorAll('[data-field-tab]').forEach(button => {
+      button.addEventListener('click', () => {
+        fieldConfigType = button.dataset.fieldTab;
+        renderFieldConfig();
+      });
+    });
+    $('fieldConfigSearch')?.addEventListener('input', () => renderFieldConfig());
+    $('resetFieldConfigButton')?.addEventListener('click', () => {
+      if (!fieldConfigDraft) return;
+      fieldConfigDraft[fieldConfigType] = defaultFieldIds(fieldConfigType);
+      renderFieldConfig();
+    });
+    $('closeFieldConfigButton')?.addEventListener('click', closeFieldConfig);
+    $('cancelFieldConfigButton')?.addEventListener('click', closeFieldConfig);
+    $('saveFieldConfigButton')?.addEventListener('click', () => saveFieldConfig().catch(error => setStatus(error.message, 'error')));
+    $('fieldConfigModal')?.addEventListener('click', event => {
+      if (event.target.id === 'fieldConfigModal') closeFieldConfig();
+    });
     $('linkInput').addEventListener('input', () => {
       const links = parseProductLinks($('linkInput').value);
       $('linkCount').textContent = `${links.length} 个链接`;
@@ -1553,7 +1955,7 @@
     renderMonitorKind();
     try {
       await loadSettings();
-      await Promise.all([refreshCurrentPage(), refreshCount(), refreshHistory(), refreshJob(), refreshMonitors()]);
+      await Promise.all([refreshCurrentPage(), refreshCount(), refreshHistory(), refreshTasks(), refreshJob(), refreshMonitors()]);
     } catch (error) {
       setStatus(error.message || '插件初始化失败，请刷新侧边栏重试。', 'error');
     }
@@ -1561,6 +1963,7 @@
     let monitorPollTick = 0;
     const pollTimer = setInterval(() => {
       void refreshJob().catch(() => {});
+      void refreshTasks().catch(() => {});
       void refreshCount().catch(() => {});
       monitorPollTick += 1;
       if (currentScreen === 'monitor' && monitorPollTick % 5 === 0) void refreshMonitors().catch(() => {});

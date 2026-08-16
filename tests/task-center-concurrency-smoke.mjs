@@ -1,0 +1,370 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+
+const JOBS_KEY = 'xianyu_collect_jobs_v2';
+const LEGACY_JOB_KEY = 'xianyu_collect_job_v1';
+const storage = new Map();
+const messageListeners = [];
+const tabUpdates = [];
+const filenameListeners = [];
+
+function event(listeners) {
+  return {
+    addListener(listener) {
+      listeners.push(listener);
+    },
+    removeListener(listener) {
+      const index = listeners.indexOf(listener);
+      if (index >= 0) listeners.splice(index, 1);
+    }
+  };
+}
+
+const chrome = {
+  storage: {
+    local: {
+      async get(keys) {
+        if (typeof keys === 'string') return { [keys]: storage.get(keys) };
+        const result = {};
+        for (const key of Array.isArray(keys) ? keys : Object.keys(keys || {})) {
+          if (storage.has(key)) result[key] = storage.get(key);
+        }
+        return result;
+      },
+      async set(values) {
+        for (const [key, value] of Object.entries(values)) storage.set(key, value);
+      }
+    }
+  },
+  runtime: {
+    lastError: null,
+    getURL(path) {
+      return `chrome-extension://task-center-test/${path}`;
+    },
+    sendMessage() {
+      return Promise.resolve({ ok: true });
+    },
+    onInstalled: event([]),
+    onStartup: event([]),
+    onMessage: event(messageListeners)
+  },
+  alarms: {
+    clear() {
+      return Promise.resolve(true);
+    },
+    create() {},
+    onAlarm: event([])
+  },
+  tabs: {
+    create(_options, callback) {
+      callback({ id: 101 });
+    },
+    get(_tabId, callback) {
+      callback({ id: 77, url: 'https://www.goofish.com/item?id=store-item-1' });
+    },
+    update(_tabId, properties, callback) {
+      tabUpdates.push(properties?.url || '');
+      callback({ id: 77, url: properties?.url || '' });
+    },
+    remove(_tabId, callback) {
+      callback();
+    },
+    sendMessage() {
+      return Promise.resolve({ ok: true });
+    },
+    onUpdated: event([]),
+    onRemoved: event([])
+  },
+  action: {
+    onClicked: event([]),
+    setBadgeText() {
+      return Promise.resolve();
+    },
+    setBadgeBackgroundColor() {
+      return Promise.resolve();
+    }
+  },
+  notifications: {
+    create() {
+      return Promise.resolve();
+    }
+  },
+  sidePanel: {
+    setPanelBehavior() {
+      return Promise.resolve();
+    },
+    open() {
+      return Promise.resolve();
+    }
+  },
+  downloads: {
+    onDeterminingFilename: event(filenameListeners),
+    download(_options, callback) {
+      callback(1);
+    }
+  },
+  offscreen: {
+    createDocument() {
+      return Promise.resolve();
+    },
+    closeDocument() {
+      return Promise.resolve();
+    }
+  },
+  scripting: {
+    executeScript() {
+      return Promise.resolve();
+    }
+  }
+};
+
+const context = vm.createContext({
+  chrome,
+  console,
+  URL,
+  Date,
+  Math,
+  Map,
+  Set,
+  Promise,
+  Number,
+  String,
+  Boolean,
+  Object,
+  Array,
+  JSON,
+  RegExp,
+  Error,
+  TypeError,
+  parseInt,
+  parseFloat,
+  isNaN,
+  setTimeout,
+  clearTimeout
+});
+
+const source = fs.readFileSync(new URL('../background.js', import.meta.url), 'utf8');
+vm.runInContext(
+  `${source}\n;globalThis.__taskCenterTestApi = { writeJob, readJobs, readJob, jobLinkUrl, jobLinkItemId, collectedItemForLink, advanceLinkJob, downloadFileName, exportTimestamp, rememberDownloadName, clearAllJobs, storeDiscoverySummary, storeDiscoveryWarning, createDetailSession, ensureDetailSession };`,
+  context
+);
+
+assert.equal(filenameListeners.length, 1, 'downloads filename override listener must be registered');
+context.__taskCenterTestApi.rememberDownloadName('blob:test-export', '研究导出/商品20260815-1251.xlsx');
+let suggestedFilename = '';
+filenameListeners[0]({ url: 'blob:test-export' }, suggestion => {
+  suggestedFilename = suggestion?.filename || '';
+});
+assert.equal(suggestedFilename, '研究导出/商品20260815-1251.xlsx', 'download filename override must preserve the business filename');
+
+assert.equal(
+  context.__taskCenterTestApi.exportTimestamp(new Date('2026-08-15T12:51:00+08:00')),
+  '20260815-1251',
+  'export timestamp must use local date and minute precision'
+);
+const filenameSettings = { downloadFolder: '研究导出' };
+assert.match(
+  context.__taskCenterTestApi.downloadFileName(filenameSettings, 3, 'data', 'rpa', {}, []),
+  /^研究导出\/商品\d{8}-\d{4}\.xlsx$/,
+  'product exports must use the 商品YYYYMMDD-HHmm filename rule'
+);
+assert.match(
+  context.__taskCenterTestApi.downloadFileName(filenameSettings, 3, 'store', 'rpa', {
+    storeProfiles: [{ sellerName: '小林爱写作' }]
+  }, []),
+  /^研究导出\/店铺评价-小林爱写作-\d{8}-\d{4}\.xlsx$/,
+  'store review exports must include the store name'
+);
+assert.match(
+  context.__taskCenterTestApi.downloadFileName(filenameSettings, 3, 'store-products', 'rpa', {}, [{ sellerName: '小林爱写作' }]),
+  /^研究导出\/商品表-小林爱写作-\d{8}-\d{4}\.xlsx$/,
+  'store product exports must include the store name'
+);
+assert.match(
+  context.__taskCenterTestApi.downloadFileName(filenameSettings, 3, 'store-products', 'rpa', {
+    storeName: '显式店铺名'
+  }, []),
+  /^研究导出\/商品表-显式店铺名-\d{8}-\d{4}\.xlsx$/,
+  'store product exports must prefer the persisted store name when item fields are incomplete'
+);
+
+assert.equal(
+  context.__taskCenterTestApi.jobLinkUrl({ itemId: 'object-link-1', itemUrl: 'https://www.goofish.com/item?id=object-link-1' }),
+  'https://www.goofish.com/item?id=object-link-1',
+  'store-products link objects must normalize to a string URL before navigation'
+);
+assert.equal(
+  context.__taskCenterTestApi.jobLinkItemId({ itemId: 'object-link-1', itemUrl: 'https://www.goofish.com/item?id=object-link-1' }),
+  'object-link-1',
+  'store-products link objects must keep their item id'
+);
+const incompleteDiscovery = context.__taskCenterTestApi.storeDiscoverySummary({
+  publicProductCount: 12,
+  discoveredProductCount: 4,
+  discoveryComplete: false,
+  discoveryReason: 'discovery-timeout-before-public-total',
+  items: []
+});
+assert.equal(incompleteDiscovery.publicProductCount, 12);
+assert.equal(incompleteDiscovery.discoveredProductCount, 4);
+assert.equal(incompleteDiscovery.discoveryComplete, false);
+assert.equal(incompleteDiscovery.discoveryReason, 'discovery-timeout-before-public-total');
+assert.equal(incompleteDiscovery.mismatch, true, 'store discovery must not treat four links as complete when the public store count is twelve');
+assert.equal(
+  context.__taskCenterTestApi.storeDiscoverySummary({
+    publicProductCount: 12,
+    discoveredProductCount: 12,
+    discoveryComplete: true,
+    discoveryReason: 'public-total-reached',
+    items: []
+  }).mismatch,
+  false,
+  'store discovery must close the discovery phase after reaching the public total'
+);
+const sessionJob = context.__taskCenterTestApi.ensureDetailSession({
+  id: 'session-test',
+  detailSession: null
+}, 'https://www.goofish.com/item?id=session-1');
+assert.equal(sessionJob.detailSession.url, 'https://www.goofish.com/item?id=session-1');
+assert.equal(sessionJob.detailSession.attempts, 0);
+assert.notEqual(sessionJob.detailSession.id, context.__taskCenterTestApi.ensureDetailSession({
+  id: 'session-test',
+  detailSession: null
+}, 'https://www.goofish.com/item?id=session-2').detailSession.id);
+const matched = context.__taskCenterTestApi.collectedItemForLink({ items: [{
+  itemId: 'object-link-1',
+  itemUrl: 'https://www.goofish.com/item?id=object-link-1',
+  title: '店铺商品'
+}] }, { itemId: 'object-link-1', itemUrl: 'https://www.goofish.com/item?id=object-link-1' });
+assert.equal(matched?.title, '店铺商品', 'detail results must match a normalized store-products link object');
+
+const objectNavigationJob = {
+  id: 'store-products-navigation',
+  type: 'store-products',
+  status: 'collecting',
+  stage: 'detail-page',
+  tabId: 88,
+  links: [
+    { itemId: 'navigation-1', itemUrl: 'https://www.goofish.com/item?id=navigation-1' },
+    { itemId: 'navigation-2', itemUrl: 'https://www.goofish.com/item?id=navigation-2' }
+  ],
+  index: 0,
+  collected: 0,
+  visited: 0,
+  failures: [],
+  sellerFailures: [],
+  qualityWarnings: [],
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString()
+};
+await context.__taskCenterTestApi.writeJob(objectNavigationJob);
+const advancedObjectJob = await context.__taskCenterTestApi.advanceLinkJob(objectNavigationJob, '详情页等待超时');
+assert.equal(
+  tabUpdates.at(-1),
+  'https://www.goofish.com/item?id=navigation-2',
+  'store-products navigation must pass the object itemUrl string to tabs.update'
+);
+assert.equal(advancedObjectJob.failures?.[0]?.url, 'https://www.goofish.com/item?id=navigation-1');
+assert.equal(advancedObjectJob.failures?.[0]?.itemId, 'navigation-1');
+
+const now = new Date().toISOString();
+const firstJob = {
+  id: 'parallel-first',
+  type: 'links',
+  status: 'ready-to-collect',
+  tabId: 11,
+  links: ['https://www.goofish.com/item?id=first'],
+  stagedItems: [],
+  resultKeys: [],
+  createdAt: now,
+  updatedAt: now
+};
+const secondJob = {
+  id: 'parallel-second',
+  type: 'search',
+  status: 'ready-to-collect',
+  tabId: 22,
+  links: [],
+  stagedItems: [],
+  resultKeys: [],
+  createdAt: now,
+  updatedAt: now
+};
+
+await Promise.all([
+  context.__taskCenterTestApi.writeJob(firstJob),
+  context.__taskCenterTestApi.writeJob(secondJob)
+]);
+
+let jobs = await context.__taskCenterTestApi.readJobs();
+assert.deepEqual(
+  new Set(jobs.map(job => job.id)),
+  new Set(['parallel-first', 'parallel-second', 'store-products-navigation']),
+  'concurrent task updates must not overwrite another task or navigation regression fixture'
+);
+
+const storeProductsJob = {
+  id: 'store-products-smoke',
+  type: 'store-products',
+  status: 'collecting',
+  stage: 'detail-page',
+  tabId: 77,
+  links: ['https://www.goofish.com/item?id=store-item-1'],
+  index: 0,
+  stagedItems: [],
+  resultKeys: [],
+  collected: 0,
+  visited: 0,
+  failures: [],
+  sellerFailures: [],
+  qualityWarnings: [],
+  createdAt: now,
+  updatedAt: now
+};
+await context.__taskCenterTestApi.writeJob(storeProductsJob);
+
+const collectResponse = await new Promise((resolve, reject) => {
+  try {
+    const returned = messageListeners[0]({
+      type: 'COLLECT_ITEMS',
+      pageType: 'detail',
+      persistToDataCenter: false,
+      items: [{
+        itemId: 'store-item-1',
+        itemUrl: 'https://www.goofish.com/item?id=store-item-1',
+        title: '店铺商品详情',
+        description: '商品详情文案',
+        price: '80',
+        images: ['https://img.example/store-item-1.jpg'],
+        sellerName: '测试店铺'
+      }]
+    }, {
+      tab: { id: 77, url: 'https://www.goofish.com/item?id=store-item-1' }
+    }, resolve);
+    assert.equal(returned, true, 'COLLECT_ITEMS must keep the response channel open');
+  } catch (error) {
+    reject(error);
+  }
+});
+
+assert.equal(collectResponse.ok, true);
+assert.equal(collectResponse.staged, true);
+assert.equal(collectResponse.stagedItems.length, 1, 'store-products results must enter the task staging area');
+assert.equal(collectResponse.stagedItems[0].itemId, 'store-item-1');
+
+jobs = await context.__taskCenterTestApi.readJobs();
+const storedStoreJob = jobs.find(job => job.id === storeProductsJob.id);
+assert.equal(storedStoreJob?.stagedItems?.length, 1, 'store-products staging must persist in the task center');
+assert.equal(storage.has(LEGACY_JOB_KEY), true, 'legacy primary task key remains available for migration');
+
+const clearCount = await context.__taskCenterTestApi.clearAllJobs();
+assert.ok(clearCount >= 1, 'clear all jobs must report the number of persisted jobs');
+assert.equal((await context.__taskCenterTestApi.readJobs()).length, 0, 'clear all jobs must remove every persisted task');
+
+console.log(JSON.stringify({
+  ok: true,
+  taskCount: clearCount,
+  stagedStoreProducts: storedStoreJob.stagedItems.length,
+  filenameOverride: suggestedFilename
+}));
